@@ -185,11 +185,13 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
     return node
 
 
-def scan_active_window(cache: Optional[ControlCache] = None) -> Optional[dict]:
+def scan_active_window(cache: Optional[ControlCache] = None,
+                       target: Optional[str] = None) -> Optional[dict]:
     """
-    采集当前活跃窗口的控件树。
+    采集控件树。
 
-    返回结构化 dict，根节点为窗口信息。
+    target=None 时扫描当前活跃窗口。
+    target="QQ" 时扫描名称包含 target 的窗口（模糊匹配）。
     """
     if cache is None:
         cache = get_global_cache()
@@ -208,33 +210,53 @@ def scan_active_window(cache: Optional[ControlCache] = None) -> Optional[dict]:
         logger.error("GetRootControl() failed: %s", exc)
         return None
 
-    # 找到活跃窗口
-    try:
-        active_control = uia.GetFocusedControl()
-        if active_control is None:
-            # fallback: 拿第一个顶层窗口
-            windows = root.GetChildren()
-            if windows:
-                active_control = windows[0]
-            else:
-                logger.error("No window found")
-                return None
+    active_window = None
 
-        # 确保我们拿到的是顶层窗口（而不是内部焦点控件）
-        # 沿着祖先链找到顶层窗口
-        walk = active_control
-        while walk:
-            try:
-                parent = walk.GetParentControl()
-                if parent is None or parent == root:
+    if target:
+        # 按名称搜索目标窗口
+        target_lower = target.lower()
+        try:
+            windows = root.GetChildren()
+            for w in windows[:50]:
+                try:
+                    name = (getattr(w, "Name", "") or "").lower()
+                    if target_lower in name:
+                        active_window = w
+                        break
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.error("Window enumeration failed: %s", exc)
+            return None
+
+        if active_window is None:
+            logger.error("No window matching '%s' found", target)
+            return None
+    else:
+        # 找活跃窗口
+        try:
+            active_control = uia.GetFocusedControl()
+            if active_control is None:
+                windows = root.GetChildren()
+                if windows:
+                    active_control = windows[0]
+                else:
+                    logger.error("No window found")
+                    return None
+
+            walk = active_control
+            while walk:
+                try:
+                    parent = walk.GetParentControl()
+                    if parent is None or parent == root:
+                        break
+                    walk = parent
+                except Exception:
                     break
-                walk = parent
-            except Exception:
-                break
-        active_window = walk
-    except Exception as exc:
-        logger.error("Failed to find active window: %s", exc)
-        return None
+            active_window = walk
+        except Exception as exc:
+            logger.error("Failed to find active window: %s", exc)
+            return None
 
     # 采集窗口控件树
     window_node = scan_control(active_window, cache, 0, start_time,

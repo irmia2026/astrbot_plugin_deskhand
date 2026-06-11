@@ -1,9 +1,10 @@
 """
-desk_state.py — Tool: 采集活跃窗口控件树。
+desk_state.py — Tool: 采集控件树。
 """
 
 import json
 import logging
+from typing import Optional
 
 from ..engine.scanner import scan_active_window
 from ..engine.cache import get_global_cache
@@ -11,17 +12,18 @@ from ..engine.cache import get_global_cache
 logger = logging.getLogger("deskhand.tools.state")
 
 
-def desk_state() -> str:
+def desk_state(target: Optional[str] = None) -> str:
     """
-    采集当前活跃窗口的控件树，返回 JSON 字符串。
+    采集控件树。
 
-    包含 id / role / name / value / rect / enabled / children。
-    控件 id 在多次调用间保持稳定。
+    target=None 时扫描全桌面（当前活跃窗口）。
+    target="QQ" 时只扫描名称包含 "QQ" 的窗口（模糊匹配，不区分大小写）。
     """
     cache = get_global_cache()
-    tree = scan_active_window(cache)
+    tree = scan_active_window(cache, target=target)
     if tree is None:
-        return json.dumps({"error": "无法采集控件树"}, ensure_ascii=False)
+        msg = f"未找到匹配 '{target}' 的窗口" if target else "无法采集控件树"
+        return json.dumps({"error": msg}, ensure_ascii=False)
 
     # 截断输出以控制 token 长度
     def _truncate(node: dict, depth: int = 0) -> dict:
