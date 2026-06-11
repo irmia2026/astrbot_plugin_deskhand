@@ -2,13 +2,29 @@
 cache.py — 控件 ID ↔ RuntimeId 映射，保证多次 state() 调用间 ID 稳定。
 
 UIA RuntimeId 是 int 元组，在控件所属进程生命周期内保持不变。
-首次扫描时分配自增 id，LRU 淘汰，上限 128 条。
+首次扫描时分配自增 id，LRU 淘汰，上限 128 条（可通过配置覆盖）。
 """
 
+import os
+import json
 from collections import OrderedDict
 from typing import Optional
 
 MAX_CACHE_SIZE = 128
+
+
+def _get_cache_size() -> int:
+    """尝试从配置读取 cache_size，失败返回默认值。"""
+    try:
+        config_path = os.environ.get("ASTRBOT_CONFIG_PATH", "")
+        if config_path and os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            plugin_cfg = cfg.get("astrbot_plugin_deskhand", {})
+            return plugin_cfg.get("cache_size", MAX_CACHE_SIZE)
+    except Exception:
+        pass
+    return MAX_CACHE_SIZE
 
 
 class ControlCache:
@@ -29,8 +45,8 @@ class ControlCache:
             return cid
         # 淘汰最久未用
         if len(self._id_to_rt) >= self._max_size:
-            oldest, _ = self._id_to_rt.popitem(last=False)
-            del self._rt_to_id[oldest]
+            oldest_cid, oldest_rt = self._id_to_rt.popitem(last=False)
+            del self._rt_to_id[oldest_rt]
         cid = self._next_id
         self._next_id += 1
         self._id_to_rt[cid] = runtime_id
@@ -65,9 +81,12 @@ class ControlCache:
         return list(self._id_to_rt.keys())
 
 
-# 全局单例
-_global_cache = ControlCache()
+# 全局单例（延迟初始化以支持配置）
+_global_cache: Optional[ControlCache] = None
 
 
 def get_global_cache() -> ControlCache:
+    global _global_cache
+    if _global_cache is None:
+        _global_cache = ControlCache(max_size=_get_cache_size())
     return _global_cache

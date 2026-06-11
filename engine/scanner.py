@@ -24,10 +24,37 @@ _CHROMIUM_HOST_CLASSES = {
 # 采集的字段
 _CONTROL_FIELDS = ("id", "role", "name", "value", "rect", "enabled")
 
-# 默认限制
+# 默认限制（可通过配置覆盖）
 MAX_DEPTH = 15
 MAX_CHILDREN = 120
 SCAN_TIMEOUT_SEC = 5.0
+
+
+def _get_config() -> dict:
+    """尝试从 AstrBot 配置读取参数，失败返回空 dict。"""
+    try:
+        # AstrBot 配置通常通过环境或全局上下文获取
+        # 这里尝试读取已知的配置路径
+        import json
+        import os
+        config_path = os.environ.get("ASTRBOT_CONFIG_PATH", "")
+        if config_path and os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            return cfg.get("astrbot_plugin_deskhand", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _get_scan_limits() -> tuple[int, int, float]:
+    """返回 (max_depth, max_children, scan_timeout_sec)。"""
+    cfg = _get_config()
+    return (
+        cfg.get("max_depth", MAX_DEPTH),
+        cfg.get("max_children", MAX_CHILDREN),
+        cfg.get("scan_timeout", SCAN_TIMEOUT_SEC),
+    )
 
 
 def _is_chromium_host(control) -> bool:
@@ -86,7 +113,10 @@ def _safe_rect(control) -> dict:
 
 
 def scan_control(control, cache: ControlCache, depth: int = 0,
-                 start_time: Optional[float] = None) -> Optional[dict]:
+                 start_time: Optional[float] = None,
+                 max_depth: int = MAX_DEPTH,
+                 max_children: int = MAX_CHILDREN,
+                 scan_timeout: float = SCAN_TIMEOUT_SEC) -> Optional[dict]:
     """
     递归采集单个控件及其子树。
 
@@ -95,11 +125,11 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
     if start_time is None:
         start_time = time.monotonic()
 
-    if time.monotonic() - start_time > SCAN_TIMEOUT_SEC:
+    if time.monotonic() - start_time > scan_timeout:
         logger.warning("Scan timeout at depth %d", depth)
         return None
 
-    if depth > MAX_DEPTH:
+    if depth > max_depth:
         return None
 
     try:
@@ -122,9 +152,10 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
     if role in ("EditControl", "DocumentControl", "ComboBoxControl"):
         # 尝试通过 ValuePattern 获取文本
         try:
-            value_obj = control.GetValuePattern()
-            if value_obj:
-                val = value_obj.Value
+            import uiautomation as uia
+            vp = control.GetPattern(uia.PatternId.ValuePattern)
+            if vp:
+                val = vp.CurrentValue
                 value = val[:100] if val else ""
         except Exception:
             pass
@@ -140,12 +171,13 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
     }
 
     # 递归采集子控件 — 即使是 Chromium 宿主也正常递归
-    children = _safe_get_children(control)
+    children = _safe_get_children(control, max_children)
     for child in children:
-        if len(node["children"]) >= MAX_CHILDREN:
-            logger.debug("Max children (%d) reached at depth %d", MAX_CHILDREN, depth)
+        if len(node["children"]) >= max_children:
+            logger.debug("Max children (%d) reached at depth %d", max_children, depth)
             break
-        child_node = scan_control(child, cache, depth + 1, start_time)
+        child_node = scan_control(child, cache, depth + 1, start_time,
+                                  max_depth, max_children, scan_timeout)
         if child_node is not None:
             node["children"].append(child_node)
 
@@ -163,6 +195,7 @@ def scan_active_window(cache: Optional[ControlCache] = None) -> Optional[dict]:
 
     import uiautomation as uia
 
+    max_depth, max_children, scan_timeout = _get_scan_limits()
     start_time = time.monotonic()
 
     try:
@@ -176,7 +209,7 @@ def scan_active_window(cache: Optional[ControlCache] = None) -> Optional[dict]:
 
     # 找到活跃窗口
     try:
-        active_control = root.GetFocusedControl()
+        active_control = uia.GetFocusedControl()
         if active_control is None:
             # fallback: 拿第一个顶层窗口
             windows = root.GetChildren()
@@ -203,7 +236,8 @@ def scan_active_window(cache: Optional[ControlCache] = None) -> Optional[dict]:
         return None
 
     # 采集窗口控件树
-    window_node = scan_control(active_window, cache, 0, start_time)
+    window_node = scan_control(active_window, cache, 0, start_time,
+                               max_depth, max_children, scan_timeout)
     if window_node is None:
         logger.error("Failed to scan active window")
         return None

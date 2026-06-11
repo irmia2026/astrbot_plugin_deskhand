@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional
 
-from engine.annotator import screenshot, annotate, img_to_base64
+from engine.annotator import screenshot, annotate as _annotate, img_to_base64
 from engine.scanner import scan_active_window
 from engine.cache import get_global_cache
 
@@ -39,7 +39,7 @@ def desk_screenshot(annotate: bool = False) -> str:
             img = screenshot()
 
         if annotate and tree:
-            img = annotate(img, tree)
+            img = _annotate(img, tree)
 
         return json.dumps({
             "success": True,

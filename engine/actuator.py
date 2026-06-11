@@ -27,7 +27,12 @@ def _get_control_by_id(cid: int, cache: Optional[ControlCache] = None):
 
     import uiautomation as uia
     try:
-        control = uia.ControlFromRuntimeId(list(runtime_id))
+        # uiautomation 没有 ControlFromRuntimeId，
+        # 改用 FindControl 搜索：从根控件出发，匹配 RuntimeId
+        root = uia.GetRootControl()
+        # 构建搜索条件：RuntimeId 是 int 列表
+        condition = uia.CreatePropertyCondition(uia.PropertyId.RuntimeIdProperty, list(runtime_id))
+        control = root.FindFirst(uia.TreeScope.Descendants, condition)
         if control is None:
             raise RuntimeError(f"控件 id={cid} 已失效（RuntimeId 找不到控件）")
         return control
@@ -40,22 +45,23 @@ def _precheck(control) -> None:
     try:
         if not control.Exists(0.5):
             raise RuntimeError("控件不存在或已销毁")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"precheck 失败: {exc}")
 
     try:
         if not control.IsEnabled:
             raise RuntimeError("控件已禁用（disabled）")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"precheck 失败: {exc}")
 
 
 def _clickable_point(control) -> tuple[int, int]:
     """获取控件的可点击坐标。"""
     try:
         pt = control.GetClickablePoint()
-        if pt:
-            return (int(pt.x), int(pt.y))
+        if pt and len(pt) >= 2:
+            # GetClickablePoint 返回 tuple(x, y, isClickable)
+            return (int(pt[0]), int(pt[1]))
     except Exception:
         pass
     # fallback: 矩形中心
@@ -198,9 +204,10 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
     if line is not None:
         # 先获取当前值，修改指定行
         try:
-            vp = control.GetValuePattern()
+            import uiautomation as uia
+            vp = control.GetPattern(uia.PatternId.ValuePattern)
             if vp:
-                current = vp.Value or ""
+                current = vp.CurrentValue or ""
                 lines = current.split("\n")
                 idx = line - 1
                 if 0 <= idx < len(lines):
@@ -223,8 +230,10 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
             # 先清空再输入
             control.SendKeys("{Ctrl}a{Delete}")
             time.sleep(0.05)
-        # 转义特殊字符
+        # 转义特殊字符：uiautomation SendKeys 中 {} 是特殊语法
+        # \n -> {Enter}, \t -> {Tab}
         safe_text = text.replace("{", "{{").replace("}", "}}")
+        safe_text = safe_text.replace("\n", "{Enter}").replace("\t", "{Tab}")
         control.SendKeys(safe_text)
         return {"success": True, "action": "type", "id": cid,
                 "text": text, "method": "SendKeys"}
@@ -238,42 +247,94 @@ def press(keys: list[str], action: str = "press") -> dict:
     action="press" 按下即释放；"key_down" 按住不放；"key_up" 释放。
     """
     import uiautomation as uia
+    import win32api
+    import win32con
 
-    key_map = {
-        "ctrl": uia.ModifierKey.Control,
-        "alt": uia.ModifierKey.Alt,
-        "shift": uia.ModifierKey.Shift,
-        "win": uia.ModifierKey.Win,
+    # 虚拟键码映射（常用键）
+    vk_map = {
+        "ctrl": win32con.VK_CONTROL,
+        "alt": win32con.VK_MENU,
+        "shift": win32con.VK_SHIFT,
+        "win": win32con.VK_LWIN,
+        "enter": win32con.VK_RETURN,
+        "return": win32con.VK_RETURN,
+        "tab": win32con.VK_TAB,
+        "esc": win32con.VK_ESCAPE,
+        "escape": win32con.VK_ESCAPE,
+        "space": win32con.VK_SPACE,
+        "backspace": win32con.VK_BACK,
+        "delete": win32con.VK_DELETE,
+        "up": win32con.VK_UP,
+        "down": win32con.VK_DOWN,
+        "left": win32con.VK_LEFT,
+        "right": win32con.VK_RIGHT,
+        "home": win32con.VK_HOME,
+        "end": win32con.VK_END,
+        "pageup": win32con.VK_PRIOR,
+        "pagedown": win32con.VK_NEXT,
+        "f1": win32con.VK_F1,
+        "f2": win32con.VK_F2,
+        "f3": win32con.VK_F3,
+        "f4": win32con.VK_F4,
+        "f5": win32con.VK_F5,
+        "f6": win32con.VK_F6,
+        "f7": win32con.VK_F7,
+        "f8": win32con.VK_F8,
+        "f9": win32con.VK_F9,
+        "f10": win32con.VK_F10,
+        "f11": win32con.VK_F11,
+        "f12": win32con.VK_F12,
     }
 
-    # 构建修饰键 + 普通键
-    modifiers = 0
-    normal_keys = []
+    # 收集修饰键和普通键的虚拟键码
+    modifier_vks = []
+    normal_vks = []
     for k in keys:
         kl = k.lower()
-        if kl in key_map:
-            modifiers |= key_map[kl]
+        vk = vk_map.get(kl)
+        if vk is None:
+            # 尝试单字符
+            if len(k) == 1:
+                vk = win32api.VkKeyScan(k)
+                if vk != -1:
+                    vk = vk & 0xFF
+                else:
+                    vk = ord(k.upper())
+            else:
+                raise RuntimeError(f"未知按键: {k}")
+        if kl in ("ctrl", "alt", "shift", "win"):
+            modifier_vks.append(vk)
         else:
-            normal_keys.append(k)
+            normal_vks.append(vk)
+
+    def _key_event(vk: int, flags: int = 0) -> None:
+        win32api.keybd_event(vk, 0, flags, 0)
 
     if action == "press":
-        if normal_keys:
-            uia.SendKeys(" ".join(normal_keys), modifiers)
-        elif modifiers:
-            # 只按修饰键
-            uia.SendKey(modifiers)
+        # 按下修饰键
+        for vk in modifier_vks:
+            _key_event(vk, 0)
+            time.sleep(0.02)
+        # 按下普通键
+        for vk in normal_vks:
+            _key_event(vk, 0)
+            time.sleep(0.02)
+            _key_event(vk, win32con.KEYEVENTF_KEYUP)
+            time.sleep(0.02)
+        # 释放修饰键
+        for vk in reversed(modifier_vks):
+            _key_event(vk, win32con.KEYEVENTF_KEYUP)
+            time.sleep(0.02)
         return {"success": True, "action": "press", "keys": keys}
 
     elif action == "key_down":
-        # 按住修饰键
-        if modifiers:
-            uia.SendKey(modifiers, waitTime=0)
+        for vk in modifier_vks + normal_vks:
+            _key_event(vk, 0)
         return {"success": True, "action": "key_down", "keys": keys}
 
     elif action == "key_up":
-        # 释放修饰键 — uiautomation 没有直接 key_up，这里用 SendKey 模拟
-        if modifiers:
-            uia.SendKey(modifiers, waitTime=0)
+        for vk in modifier_vks + normal_vks:
+            _key_event(vk, win32con.KEYEVENTF_KEYUP)
         return {"success": True, "action": "key_up", "keys": keys}
 
     else:
@@ -288,13 +349,31 @@ def select_text(cid: int, start: int, end: int,
 
     # 尝试 TextPattern
     try:
-        tp = control.GetTextPattern()
+        import uiautomation as uia
+        tp = control.GetPattern(uia.PatternId.TextPattern)
         if tp:
-            tp.SetSelection(start, end)
-            sel = tp.GetSelection()
-            selected_text = sel[0].GetText(-1) if sel else ""
+            # 获取文档范围
+            doc_range = tp.DocumentRange
+            # 创建起始和结束范围
+            start_range = doc_range.GetEnclosingElement()
+            # 通过 MoveEndpointByUnit 移动端点
+            range_obj = doc_range.Clone()
+            range_obj.MoveEndpointByUnit(
+                uia.TextPatternRangeEndpoint.Start,
+                uia.TextUnit.Character,
+                start
+            )
+            range_obj.MoveEndpointByUnit(
+                uia.TextPatternRangeEndpoint.End,
+                uia.TextUnit.Character,
+                end - start
+            )
+            range_obj.Select()
+            # 获取选中文本
+            selected_text = range_obj.GetText(-1) or ""
             return {"success": True, "action": "select", "id": cid,
-                    "start": start, "end": end, "selected": selected_text}
+                    "start": start, "end": end, "selected": selected_text,
+                    "method": "TextPattern"}
     except Exception:
         pass
 
@@ -329,12 +408,25 @@ def scroll(cid: int, direction: str, amount: int = 3,
 
     # 尝试 ScrollPattern
     try:
-        sp = control.GetScrollPattern()
+        import uiautomation as uia
+        sp = control.GetPattern(uia.PatternId.ScrollPattern)
         if sp:
+            # ScrollPattern.Scroll(horizontalAmount, verticalAmount)
+            # 参数为 ScrollAmount 枚举值
+            h_amount = uia.ScrollAmount.NoAmount
+            v_amount = uia.ScrollAmount.NoAmount
+            scroll_unit = uia.ScrollAmount.SmallIncrement if amount > 0 else uia.ScrollAmount.SmallDecrement
+            if direction in ("down", "right"):
+                scroll_unit = uia.ScrollAmount.SmallIncrement
+            else:
+                scroll_unit = uia.ScrollAmount.SmallDecrement
+
             if direction in ("up", "down"):
-                sp.Scroll(verticalPercent=amount if direction == "down" else -amount)
+                v_amount = scroll_unit
             elif direction in ("left", "right"):
-                sp.Scroll(horizontalPercent=amount if direction == "right" else -amount)
+                h_amount = scroll_unit
+
+            sp.Scroll(h_amount, v_amount)
             return {"success": True, "action": "scroll", "id": cid,
                     "direction": direction, "amount": amount, "method": "ScrollPattern"}
     except Exception:
@@ -355,7 +447,7 @@ def window_action(action: str, hwnd: Optional[int] = None,
                   w: Optional[int] = None, h: Optional[int] = None) -> dict:
     """
     窗口管理操作。
-    action: min/max/restore/close/focus/set_topmost/move/resize
+    action: min/max/restore/close/focus/set_topmost/unset_topmost/move/resize
     """
     import win32gui
     import win32con
