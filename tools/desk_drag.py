@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional
 
-from engine.actuator import drag
+from ..engine.actuator import drag
 
 logger = logging.getLogger("deskhand.tools.drag")
 

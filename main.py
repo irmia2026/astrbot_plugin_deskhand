@@ -11,15 +11,15 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api.all import *
 
-from tools.desk_state import desk_state
-from tools.desk_click import desk_click
-from tools.desk_type import desk_type
-from tools.desk_press import desk_press
-from tools.desk_drag import desk_drag
-from tools.desk_scroll import desk_scroll
-from tools.desk_select import desk_select
-from tools.desk_window import desk_window
-from tools.desk_screenshot import desk_screenshot
+from .tools.desk_state import desk_state
+from .tools.desk_click import desk_click
+from .tools.desk_type import desk_type
+from .tools.desk_press import desk_press
+from .tools.desk_drag import desk_drag
+from .tools.desk_scroll import desk_scroll
+from .tools.desk_select import desk_select
+from .tools.desk_window import desk_window
+from .tools.desk_screenshot import desk_screenshot
 
 logger = logging.getLogger("deskhand")
 

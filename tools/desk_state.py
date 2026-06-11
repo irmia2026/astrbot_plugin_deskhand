@@ -5,8 +5,8 @@ desk_state.py — Tool: 采集活跃窗口控件树。
 import json
 import logging
 
-from engine.scanner import scan_active_window
-from engine.cache import get_global_cache
+from ..engine.scanner import scan_active_window
+from ..engine.cache import get_global_cache
 
 logger = logging.getLogger("deskhand.tools.state")
 

@@ -5,7 +5,7 @@ desk_click.py — Tool: 点击（左/右/中/双击）或悬停。
 import json
 import logging
 
-from engine.actuator import click
+from ..engine.actuator import click
 
 logger = logging.getLogger("deskhand.tools.click")
 

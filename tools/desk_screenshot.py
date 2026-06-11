@@ -6,9 +6,9 @@ import json
 import logging
 from typing import Optional
 
-from engine.annotator import screenshot, annotate as _annotate, img_to_base64
-from engine.scanner import scan_active_window
-from engine.cache import get_global_cache
+from ..engine.annotator import screenshot, annotate as _annotate, img_to_base64
+from ..engine.scanner import scan_active_window
+from ..engine.cache import get_global_cache
 
 logger = logging.getLogger("deskhand.tools.screenshot")
 

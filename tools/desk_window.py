@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional
 
-from engine.actuator import window_action
+from ..engine.actuator import window_action
 
 logger = logging.getLogger("deskhand.tools.window")
 

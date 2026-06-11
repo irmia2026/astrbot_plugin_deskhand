@@ -9,7 +9,7 @@ import time
 import logging
 from typing import Optional
 
-from engine.cache import get_global_cache, ControlCache
+from .cache import get_global_cache, ControlCache
 
 logger = logging.getLogger("deskhand.actuator")
 

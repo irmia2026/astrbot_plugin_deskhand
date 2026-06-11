@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional
 
-from engine.actuator import press
+from ..engine.actuator import press
 
 logger = logging.getLogger("deskhand.tools.press")
 

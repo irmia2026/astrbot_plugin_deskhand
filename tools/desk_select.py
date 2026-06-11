@@ -5,7 +5,7 @@ desk_select.py — Tool: 选中文本范围。
 import json
 import logging
 
-from engine.actuator import select_text
+from ..engine.actuator import select_text
 
 logger = logging.getLogger("deskhand.tools.select")
 

@@ -5,7 +5,7 @@ desk_scroll.py — Tool: 对指定控件滚轮。
 import json
 import logging
 
-from engine.actuator import scroll
+from ..engine.actuator import scroll
 
 logger = logging.getLogger("deskhand.tools.scroll")
 
