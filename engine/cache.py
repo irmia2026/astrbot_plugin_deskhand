@@ -41,14 +41,7 @@ class ControlCache:
         """返回 RuntimeId 对应的稳定 id，不存在则分配新 id。"""
         if runtime_id in self._rt_to_id:
             cid = self._rt_to_id[runtime_id]
-            # LRU touch
-            self._id_to_rt.move_to_end(cid)
             return cid
-        # 淘汰最久未用
-        if len(self._id_to_rt) >= self._max_size:
-            oldest_cid, oldest_rt = self._id_to_rt.popitem(last=False)
-            del self._rt_to_id[oldest_rt]
-            self._id_to_control.pop(oldest_cid, None)
         cid = self._next_id
         self._next_id += 1
         self._id_to_rt[cid] = runtime_id
