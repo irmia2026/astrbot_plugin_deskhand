@@ -9,9 +9,8 @@ import asyncio
 import json
 import logging
 
-from astrbot.api import logger, star
+from astrbot.api import logger, star, FunctionTool
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.api.all import FunctionTool
 
 from .tools.desk_state import desk_state
 from .tools.desk_click import desk_click
