@@ -9,8 +9,8 @@ import asyncio
 import json
 import logging
 
-from astrbot.api import logger, star, FunctionTool
-from astrbot.api.star import Context, Star, StarTools
+from astrbot.api import logger, FunctionTool
+from astrbot.api.star import Context, Star
 
 from .tools.desk_state import desk_state
 from .tools.desk_click import desk_click
@@ -31,7 +31,6 @@ def _err(msg: str) -> str:
     return json.dumps({"ok": False, "error": msg}, ensure_ascii=False)
 
 
-@star.register("astrbot_plugin_deskhand", "opencode", "精准 Windows GUI 操控插件", "1.0.0")
 class DeskHandPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
