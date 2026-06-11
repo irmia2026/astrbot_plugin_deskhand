@@ -176,7 +176,7 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_screenshot",
-                description="截取当前屏幕，可选标注控件边框和 id。返回 base64 图片。",
+                description="截取当前屏幕，保存 PNG 文件，返回路径、分辨率、文件大小。可选标注控件边框和 id。",
                 parameters={
                     "type": "object",
                     "properties": {
