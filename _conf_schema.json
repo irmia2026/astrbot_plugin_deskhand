@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "DeskHand 配置",
+  "description": "astrbot_plugin_deskhand 插件配置项",
+  "properties": {
+    "scan_timeout": {
+      "type": "integer",
+      "default": 5,
+      "description": "控件树扫描超时（秒）"
+    },
+    "max_depth": {
+      "type": "integer",
+      "default": 15,
+      "description": "控件树最大递归深度"
+    },
+    "max_children": {
+      "type": "integer",
+      "default": 120,
+      "description": "单个控件最大子节点数"
+    },
+    "cache_size": {
+      "type": "integer",
+      "default": 128,
+      "description": "控件 ID 缓存上限（LRU）"
+    },
+    "screenshot_annotate": {
+      "type": "boolean",
+      "default": false,
+      "description": "截图时是否默认标注控件边框"
+    }
+  },
+  "additionalProperties": false
+}

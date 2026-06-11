@@ -1,0 +1,16 @@
+name: astrbot_plugin_deskhand
+desc: 精准 Windows GUI 操控插件 — 通过 MS UI Automation 让 LLM Agent 控件级操控桌面
+help: |
+  安装后 LLM 可通过以下 Tool 操控 Windows GUI：
+  - desk_state: 采集活跃窗口控件树
+  - desk_click: 点击/悬停控件
+  - desk_type: 输入文本
+  - desk_press: 发送快捷键
+  - desk_drag: 拖拽
+  - desk_scroll: 滚动
+  - desk_select: 选中文本
+  - desk_window: 窗口管理
+  - desk_screenshot: 截图（可选标注）
+version: v1.0.0
+author: opencode
+repo: https://github.com/opencode/astrbot_plugin_deskhand
