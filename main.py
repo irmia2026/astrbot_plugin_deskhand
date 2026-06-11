@@ -31,6 +31,36 @@ def _err(msg: str) -> str:
     return json.dumps({"ok": False, "error": msg}, ensure_ascii=False)
 
 
+# ── 9 个模块级 handler（普通函数，AstrBot 会通过 functools.partial 注入 star_cls） ──
+
+async def _desk_state_handler(self, event, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_state))
+
+async def _desk_click_handler(self, event, id: int, button: str = "left", double: bool = False, hover: bool = False, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_click, id, button, double, hover))
+
+async def _desk_type_handler(self, event, id: int, text: str, line: int = None, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_type, id, text, line))
+
+async def _desk_press_handler(self, event, keys: list, action: str = "press", **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_press, keys, action))
+
+async def _desk_drag_handler(self, event, from_id: int, to_id: int = None, to_x: int = None, to_y: int = None, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_drag, from_id, to_id, to_x, to_y))
+
+async def _desk_scroll_handler(self, event, id: int, direction: str, amount: int = 3, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_scroll, id, direction, amount))
+
+async def _desk_select_handler(self, event, id: int, start: int, end: int, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_select, id, start, end))
+
+async def _desk_window_handler(self, event, action: str, hwnd: int = None, x: int = None, y: int = None, w: int = None, h: int = None, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_window, action, hwnd, x, y, w, h))
+
+async def _desk_screenshot_handler(self, event, annotate: bool = False, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_screenshot, annotate))
+
+
 class DeskHandPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -40,7 +70,7 @@ class DeskHandPlugin(Star):
                 name="desk_state",
                 description="采集当前活跃窗口的控件树，返回结构化 JSON。每个控件含 id/role/name/value/rect/enabled。",
                 parameters={"type": "object", "properties": {}, "required": []},
-                handler=self._desk_state,
+                handler=_desk_state_handler,
             ),
             FunctionTool(
                 name="desk_click",
@@ -55,7 +85,7 @@ class DeskHandPlugin(Star):
                     },
                     "required": ["id"],
                 },
-                handler=self._desk_click,
+                handler=_desk_click_handler,
             ),
             FunctionTool(
                 name="desk_type",
@@ -69,7 +99,7 @@ class DeskHandPlugin(Star):
                     },
                     "required": ["id", "text"],
                 },
-                handler=self._desk_type,
+                handler=_desk_type_handler,
             ),
             FunctionTool(
                 name="desk_press",
@@ -82,7 +112,7 @@ class DeskHandPlugin(Star):
                     },
                     "required": ["keys"],
                 },
-                handler=self._desk_press,
+                handler=_desk_press_handler,
             ),
             FunctionTool(
                 name="desk_drag",
@@ -97,7 +127,7 @@ class DeskHandPlugin(Star):
                     },
                     "required": ["from_id"],
                 },
-                handler=self._desk_drag,
+                handler=_desk_drag_handler,
             ),
             FunctionTool(
                 name="desk_scroll",
@@ -111,7 +141,7 @@ class DeskHandPlugin(Star):
                     },
                     "required": ["id", "direction"],
                 },
-                handler=self._desk_scroll,
+                handler=_desk_scroll_handler,
             ),
             FunctionTool(
                 name="desk_select",
@@ -125,7 +155,7 @@ class DeskHandPlugin(Star):
                     },
                     "required": ["id", "start", "end"],
                 },
-                handler=self._desk_select,
+                handler=_desk_select_handler,
             ),
             FunctionTool(
                 name="desk_window",
@@ -142,7 +172,7 @@ class DeskHandPlugin(Star):
                     },
                     "required": ["action"],
                 },
-                handler=self._desk_window,
+                handler=_desk_window_handler,
             ),
             FunctionTool(
                 name="desk_screenshot",
@@ -154,38 +184,9 @@ class DeskHandPlugin(Star):
                     },
                     "required": [],
                 },
-                handler=self._desk_screenshot,
+                handler=_desk_screenshot_handler,
             ),
         ]
 
         context.add_llm_tools(*tools)
         logger.info(f"DeskHand 插件已加载 — 注册了 {len(tools)} 个 LLM Tool")
-
-    # ── 9 个 handler ────────────────────────────────────────────
-
-    async def _desk_state(self, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_state))
-
-    async def _desk_click(self, id: int, button: str = "left", double: bool = False, hover: bool = False, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_click, id, button, double, hover))
-
-    async def _desk_type(self, id: int, text: str, line: int = None, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_type, id, text, line))
-
-    async def _desk_press(self, keys: list, action: str = "press", **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_press, keys, action))
-
-    async def _desk_drag(self, from_id: int, to_id: int = None, to_x: int = None, to_y: int = None, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_drag, from_id, to_id, to_x, to_y))
-
-    async def _desk_scroll(self, id: int, direction: str, amount: int = 3, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_scroll, id, direction, amount))
-
-    async def _desk_select(self, id: int, start: int, end: int, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_select, id, start, end))
-
-    async def _desk_window(self, action: str, hwnd: int = None, x: int = None, y: int = None, w: int = None, h: int = None, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_window, action, hwnd, x, y, w, h))
-
-    async def _desk_screenshot(self, annotate: bool = False, **kwargs) -> str:
-        return _ok(await asyncio.to_thread(desk_screenshot, annotate))
