@@ -28,11 +28,12 @@ def _get_cache_size() -> int:
 
 
 class ControlCache:
-    """id ↔ RuntimeId 双向映射缓存，LRU 淘汰。"""
+    """id ↔ RuntimeId 双向映射缓存，LRU 淘汰。同时存储 UIA 控件对象。"""
 
     def __init__(self, max_size: int = MAX_CACHE_SIZE):
         self._id_to_rt: OrderedDict[int, tuple[int, ...]] = OrderedDict()
         self._rt_to_id: dict[tuple[int, ...], int] = {}
+        self._id_to_control: dict[int, object] = {}  # UIA 控件对象
         self._next_id: int = 1
         self._max_size = max_size
 
@@ -47,6 +48,7 @@ class ControlCache:
         if len(self._id_to_rt) >= self._max_size:
             oldest_cid, oldest_rt = self._id_to_rt.popitem(last=False)
             del self._rt_to_id[oldest_rt]
+            self._id_to_control.pop(oldest_cid, None)
         cid = self._next_id
         self._next_id += 1
         self._id_to_rt[cid] = runtime_id
@@ -57,16 +59,39 @@ class ControlCache:
         """根据控件 id 查 RuntimeId，不存在返回 None。"""
         return self._id_to_rt.get(cid)
 
+    def set_control(self, cid: int, control) -> None:
+        """存储 UIA 控件对象。"""
+        self._id_to_control[cid] = control
+
+    def get_control(self, cid: int):
+        """获取 UIA 控件对象，可能已过期。"""
+        ctrl = self._id_to_control.get(cid)
+        if ctrl is None:
+            raise RuntimeError(f"控件 id={cid} 不在缓存中，请先调用 desk_state()")
+        # 验证控件仍有效
+        try:
+            if not ctrl.Exists(0.1):
+                self.remove(cid)
+                raise RuntimeError(f"控件 id={cid} 已失效（控件已销毁）")
+        except RuntimeError:
+            raise
+        except Exception:
+            self.remove(cid)
+            raise RuntimeError(f"控件 id={cid} 已失效")
+        return ctrl
+
     def remove(self, cid: int) -> None:
         """手动移除一个条目（当控件不再存在时）。"""
         rt = self._id_to_rt.pop(cid, None)
         if rt is not None:
             self._rt_to_id.pop(rt, None)
+        self._id_to_control.pop(cid, None)
 
     def clear(self) -> None:
         """清空缓存。"""
         self._id_to_rt.clear()
         self._rt_to_id.clear()
+        self._id_to_control.clear()
         self._next_id = 1
 
     @property

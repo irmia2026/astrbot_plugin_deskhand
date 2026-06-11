@@ -143,6 +143,7 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
         return None
 
     cid = cache.get_id(runtime_id)
+    cache.set_control(cid, control)  # 存储 UIA 控件对象，供 actuator 直接使用
 
     # 采集基础属性
     role = _safe_attr(control, "ControlTypeName", "Unknown")

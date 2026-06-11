@@ -17,27 +17,10 @@ logger = logging.getLogger("deskhand.actuator")
 # ── 辅助：从 cache 查控件 ──────────────────────────────────────
 
 def _get_control_by_id(cid: int, cache: Optional[ControlCache] = None):
-    """根据控件 id 查 UIA 控件对象。"""
+    """根据控件 id 从缓存获取 UIA 控件对象（含有效性验证）。"""
     if cache is None:
         cache = get_global_cache()
-
-    runtime_id = cache.get_runtime_id(cid)
-    if runtime_id is None:
-        raise RuntimeError(f"控件 id={cid} 不在缓存中，请先调用 desk_state()")
-
-    import uiautomation as uia
-    try:
-        # uiautomation 没有 ControlFromRuntimeId，
-        # 改用 FindControl 搜索：从根控件出发，匹配 RuntimeId
-        root = uia.GetRootControl()
-        # 构建搜索条件：RuntimeId 是 int 列表
-        condition = uia.CreatePropertyCondition(uia.PropertyId.RuntimeIdProperty, list(runtime_id))
-        control = root.FindFirst(uia.TreeScope.Descendants, condition)
-        if control is None:
-            raise RuntimeError(f"控件 id={cid} 已失效（RuntimeId 找不到控件）")
-        return control
-    except Exception as exc:
-        raise RuntimeError(f"查找控件 id={cid} 失败: {exc}")
+    return cache.get_control(cid)
 
 
 def _precheck(control) -> None:
