@@ -47,19 +47,20 @@ def _precheck(control) -> None:
 
 def _clickable_point(control) -> tuple[int, int]:
     """获取控件的可点击坐标。"""
-    try:
-        pt = control.GetClickablePoint()
-        if pt and len(pt) >= 2:
-            return (int(pt[0]), int(pt[1]))
-    except Exception:
-        pass
+    # 首选 BoundingRectangle 中心（比 GetClickablePoint 更可靠）
     try:
         bb = control.BoundingRectangle
-        if bb:
+        if bb and (bb.right - bb.left) > 0 and (bb.bottom - bb.top) > 0:
             return (
                 int((bb.left + bb.right) / 2),
                 int((bb.top + bb.bottom) / 2),
             )
+    except Exception:
+        pass
+    try:
+        pt = control.GetClickablePoint()
+        if pt and len(pt) >= 2:
+            return (int(pt[0]), int(pt[1]))
     except Exception:
         pass
     raise RuntimeError("无法获取控件可点击坐标")
