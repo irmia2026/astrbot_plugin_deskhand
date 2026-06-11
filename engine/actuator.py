@@ -3,6 +3,9 @@ actuator.py — 执行器：click / type / press / drag / scroll / select / wind
 
 所有操作前做 precheck：控件 handle 仍有效、仍 enabled。
 底层通过 uiautomation 的 UIA 后端交互，fallback 到 win32api 鼠标事件。
+
+支持 verify=True（默认），操作后自动采集多维信号并计算前后差异，
+在返回值中附加 _verify 字段供 LLM 推理操作是否生效。
 """
 
 import time
@@ -10,8 +13,12 @@ import logging
 from typing import Optional
 
 from .cache import get_global_cache, ControlCache
+from .verifier import capture_signals, compare_signals
 
 logger = logging.getLogger("deskhand.actuator")
+
+# verify 后等待时长（秒），让 GUI 反映变化
+_VERIFY_WAIT = 0.2
 
 
 # ── 辅助：从 cache 查控件 ──────────────────────────────────────
@@ -43,11 +50,9 @@ def _clickable_point(control) -> tuple[int, int]:
     try:
         pt = control.GetClickablePoint()
         if pt and len(pt) >= 2:
-            # GetClickablePoint 返回 tuple(x, y, isClickable)
             return (int(pt[0]), int(pt[1]))
     except Exception:
         pass
-    # fallback: 矩形中心
     try:
         bb = control.BoundingRectangle
         if bb:
@@ -58,6 +63,38 @@ def _clickable_point(control) -> tuple[int, int]:
     except Exception:
         pass
     raise RuntimeError("无法获取控件可点击坐标")
+
+
+def _control_rect(control) -> Optional[tuple]:
+    """返回控件的 PIL 兼容矩形 (left, top, right, bottom)。"""
+    try:
+        bb = control.BoundingRectangle
+        if bb:
+            return (int(bb.left), int(bb.top), int(bb.right), int(bb.bottom))
+    except Exception:
+        pass
+    return None
+
+
+def _active_window_rect() -> Optional[tuple]:
+    """返回当前活跃窗口的矩形。"""
+    try:
+        import win32gui
+        hwnd = win32gui.GetForegroundWindow()
+        if hwnd:
+            return win32gui.GetWindowRect(hwnd)
+    except Exception:
+        pass
+    return None
+
+
+def _window_rect_by_hwnd(hwnd: int) -> Optional[tuple]:
+    """返回指定 HWND 的窗口矩形。"""
+    try:
+        import win32gui
+        return win32gui.GetWindowRect(hwnd)
+    except Exception:
+        return None
 
 
 # ── 鼠标事件底层 ───────────────────────────────────────────────
@@ -127,27 +164,49 @@ def _mouse_wheel(x: int, y: int, amount: int) -> None:
 # ── 公开 API ───────────────────────────────────────────────────
 
 def click(cid: int, button: str = "left", double: bool = False,
-          hover: bool = False, cache: Optional[ControlCache] = None) -> dict:
-    """点击/悬停指定控件。"""
+          hover: bool = False, verify: bool = True,
+          cache: Optional[ControlCache] = None) -> dict:
+    """点击/悬停指定控件。信号: foreground, cursor, title, visual, focus。"""
     control = _get_control_by_id(cid, cache)
-    _precheck(control)
 
+    if verify:
+        target_rect = _control_rect(control)
+        before = capture_signals(target_rect=target_rect)
+
+    _precheck(control)
     x, y = _clickable_point(control)
 
     if hover:
         _mouse_move(x, y)
-        return {"success": True, "action": "hover", "id": cid, "x": x, "y": y}
+        result = {"success": True, "action": "hover", "id": cid, "x": x, "y": y}
+    else:
+        _mouse_click(x, y, button, double)
+        result = {"success": True, "action": "click", "id": cid, "button": button,
+                  "double": double, "x": x, "y": y}
 
-    _mouse_click(x, y, button, double)
-    return {"success": True, "action": "click", "id": cid, "button": button,
-            "double": double, "x": x, "y": y}
+    if verify:
+        time.sleep(_VERIFY_WAIT)
+        after = capture_signals(target_rect=target_rect)
+        result["_verify"] = compare_signals(before, after)
+
+    return result
 
 
 def drag(from_id: int, to_id: Optional[int] = None,
          to_x: Optional[int] = None, to_y: Optional[int] = None,
-         cache: Optional[ControlCache] = None) -> dict:
-    """拖拽：从控件 A 拖到控件 B 或指定坐标。"""
+         verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+    """拖拽：从控件 A 拖到控件 B 或指定坐标。信号: foreground, cursor, visual。"""
     from_control = _get_control_by_id(from_id, cache)
+
+    # 确定目标区域（用于验证截图）
+    if verify:
+        rects = [_control_rect(from_control)]
+        if to_id is not None:
+            to_control = _get_control_by_id(to_id, cache)
+            rects.append(_control_rect(to_control))
+        target_rect = _union_rects(rects) if any(rects) else None
+        before = capture_signals(target_rect=target_rect)
+
     _precheck(from_control)
     x1, y1 = _clickable_point(from_control)
 
@@ -162,7 +221,6 @@ def drag(from_id: int, to_id: Optional[int] = None,
 
     _mouse_down(x1, y1)
     time.sleep(0.1)
-    # 中间点（平滑移动）
     steps = 5
     for i in range(1, steps + 1):
         mx = int(x1 + (x2 - x1) * i / steps)
@@ -171,17 +229,26 @@ def drag(from_id: int, to_id: Optional[int] = None,
         time.sleep(0.02)
     _mouse_up(x2, y2)
 
-    return {"success": True, "action": "drag", "from_id": from_id,
-            "to_id": to_id, "to_x": x2, "to_y": y2}
+    result = {"success": True, "action": "drag", "from_id": from_id,
+              "to_id": to_id, "to_x": x2, "to_y": y2}
+
+    if verify:
+        time.sleep(_VERIFY_WAIT)
+        after = capture_signals(target_rect=target_rect)
+        result["_verify"] = compare_signals(before, after)
+
+    return result
 
 
 def type_text(cid: int, text: str, line: Optional[int] = None,
-              cache: Optional[ControlCache] = None) -> dict:
-    """
-    向控件输入文本。
-    line=None 时直接输入；line=N 时修改第 N 行（1-based）。
-    """
+              verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+    """向控件输入文本。信号: foreground, title, visual, 控件值。"""
     control = _get_control_by_id(cid, cache)
+
+    if verify:
+        target_rect = _control_rect(control)
+        before = capture_signals(target_rect=target_rect)
+
     _precheck(control)
 
     if line is not None:
@@ -196,13 +263,17 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
                 if 0 <= idx < len(lines):
                     lines[idx] = text
                 elif idx >= len(lines):
-                    # 补空行
                     lines.extend([""] * (idx - len(lines) + 1))
                     lines[idx] = text
                 new_val = "\n".join(lines)
                 vp.SetValue(new_val)
-                return {"success": True, "action": "type", "id": cid,
-                        "line": line, "text": text, "lines_affected": len(lines)}
+                result = {"success": True, "action": "type", "id": cid,
+                          "line": line, "text": text, "lines_affected": len(lines)}
+                if verify:
+                    time.sleep(_VERIFY_WAIT)
+                    after = capture_signals(target_rect=target_rect)
+                    result["_verify"] = compare_signals(before, after)
+                return result
         except Exception as exc:
             logger.warning("SetValue line-edit failed: %s", exc)
 
@@ -210,73 +281,63 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
     import uiautomation as uia
     try:
         if line is not None:
-            # 先清空再输入
             control.SendKeys("{Ctrl}a{Delete}")
             time.sleep(0.05)
-        # 转义特殊字符：uiautomation SendKeys 中 {} 是特殊语法
-        # \n -> {Enter}, \t -> {Tab}
         safe_text = text.replace("{", "{{").replace("}", "}}")
         safe_text = safe_text.replace("\n", "{Enter}").replace("\t", "{Tab}")
         control.SendKeys(safe_text)
-        return {"success": True, "action": "type", "id": cid,
-                "text": text, "method": "SendKeys"}
+        result = {"success": True, "action": "type", "id": cid,
+                  "text": text, "method": "SendKeys"}
     except Exception as exc:
-        raise RuntimeError(f"SendKeys failed: {exc}")
+        result = {"success": False, "error": str(exc)}
+        if verify:
+            result["_verify"] = {"error": "操作失败，无法采集验证信号"}
+        return result
+
+    if verify:
+        time.sleep(_VERIFY_WAIT)
+        after = capture_signals(target_rect=target_rect)
+        result["_verify"] = compare_signals(before, after)
+
+    return result
 
 
-def press(keys: list[str], action: str = "press") -> dict:
-    """
-    发送键盘按键。
-    action="press" 按下即释放；"key_down" 按住不放；"key_up" 释放。
-    """
+def press(keys: list[str], action: str = "press",
+          verify: bool = True) -> dict:
+    """发送键盘按键。信号: foreground, title, visual(活跃窗口区域)。"""
+    if verify:
+        target_rect = _active_window_rect()
+        before = capture_signals(target_rect=target_rect)
+
     import uiautomation as uia
     import win32api
     import win32con
 
-    # 虚拟键码映射（常用键）
     vk_map = {
-        "ctrl": win32con.VK_CONTROL,
-        "alt": win32con.VK_MENU,
-        "shift": win32con.VK_SHIFT,
-        "win": win32con.VK_LWIN,
-        "enter": win32con.VK_RETURN,
-        "return": win32con.VK_RETURN,
-        "tab": win32con.VK_TAB,
-        "esc": win32con.VK_ESCAPE,
-        "escape": win32con.VK_ESCAPE,
-        "space": win32con.VK_SPACE,
-        "backspace": win32con.VK_BACK,
-        "delete": win32con.VK_DELETE,
-        "up": win32con.VK_UP,
-        "down": win32con.VK_DOWN,
-        "left": win32con.VK_LEFT,
-        "right": win32con.VK_RIGHT,
-        "home": win32con.VK_HOME,
-        "end": win32con.VK_END,
-        "pageup": win32con.VK_PRIOR,
-        "pagedown": win32con.VK_NEXT,
-        "f1": win32con.VK_F1,
-        "f2": win32con.VK_F2,
-        "f3": win32con.VK_F3,
-        "f4": win32con.VK_F4,
-        "f5": win32con.VK_F5,
-        "f6": win32con.VK_F6,
-        "f7": win32con.VK_F7,
-        "f8": win32con.VK_F8,
-        "f9": win32con.VK_F9,
-        "f10": win32con.VK_F10,
-        "f11": win32con.VK_F11,
-        "f12": win32con.VK_F12,
+        "ctrl": win32con.VK_CONTROL, "alt": win32con.VK_MENU,
+        "shift": win32con.VK_SHIFT, "win": win32con.VK_LWIN,
+        "enter": win32con.VK_RETURN, "return": win32con.VK_RETURN,
+        "tab": win32con.VK_TAB, "esc": win32con.VK_ESCAPE,
+        "escape": win32con.VK_ESCAPE, "space": win32con.VK_SPACE,
+        "backspace": win32con.VK_BACK, "delete": win32con.VK_DELETE,
+        "up": win32con.VK_UP, "down": win32con.VK_DOWN,
+        "left": win32con.VK_LEFT, "right": win32con.VK_RIGHT,
+        "home": win32con.VK_HOME, "end": win32con.VK_END,
+        "pageup": win32con.VK_PRIOR, "pagedown": win32con.VK_NEXT,
+        "f1": win32con.VK_F1, "f2": win32con.VK_F2,
+        "f3": win32con.VK_F3, "f4": win32con.VK_F4,
+        "f5": win32con.VK_F5, "f6": win32con.VK_F6,
+        "f7": win32con.VK_F7, "f8": win32con.VK_F8,
+        "f9": win32con.VK_F9, "f10": win32con.VK_F10,
+        "f11": win32con.VK_F11, "f12": win32con.VK_F12,
     }
 
-    # 收集修饰键和普通键的虚拟键码
     modifier_vks = []
     normal_vks = []
     for k in keys:
         kl = k.lower()
         vk = vk_map.get(kl)
         if vk is None:
-            # 尝试单字符
             if len(k) == 1:
                 vk = win32api.VkKeyScan(k)
                 if vk != -1:
@@ -284,7 +345,10 @@ def press(keys: list[str], action: str = "press") -> dict:
                 else:
                     vk = ord(k.upper())
             else:
-                raise RuntimeError(f"未知按键: {k}")
+                result = {"success": False, "error": f"未知按键: {k}"}
+                if verify:
+                    result["_verify"] = {"error": "操作失败，无法采集验证信号"}
+                return result
         if kl in ("ctrl", "alt", "shift", "win"):
             modifier_vks.append(vk)
         else:
@@ -293,41 +357,50 @@ def press(keys: list[str], action: str = "press") -> dict:
     def _key_event(vk: int, flags: int = 0) -> None:
         win32api.keybd_event(vk, 0, flags, 0)
 
-    if action == "press":
-        # 按下修饰键
-        for vk in modifier_vks:
-            _key_event(vk, 0)
-            time.sleep(0.02)
-        # 按下普通键
-        for vk in normal_vks:
-            _key_event(vk, 0)
-            time.sleep(0.02)
-            _key_event(vk, win32con.KEYEVENTF_KEYUP)
-            time.sleep(0.02)
-        # 释放修饰键
-        for vk in reversed(modifier_vks):
-            _key_event(vk, win32con.KEYEVENTF_KEYUP)
-            time.sleep(0.02)
-        return {"success": True, "action": "press", "keys": keys}
+    try:
+        if action == "press":
+            for vk in modifier_vks:
+                _key_event(vk, 0)
+                time.sleep(0.02)
+            for vk in normal_vks:
+                _key_event(vk, 0)
+                time.sleep(0.02)
+                _key_event(vk, win32con.KEYEVENTF_KEYUP)
+                time.sleep(0.02)
+            for vk in reversed(modifier_vks):
+                _key_event(vk, win32con.KEYEVENTF_KEYUP)
+                time.sleep(0.02)
+            result = {"success": True, "action": "press", "keys": keys}
+        elif action == "key_down":
+            for vk in modifier_vks + normal_vks:
+                _key_event(vk, 0)
+            result = {"success": True, "action": "key_down", "keys": keys}
+        elif action == "key_up":
+            for vk in modifier_vks + normal_vks:
+                _key_event(vk, win32con.KEYEVENTF_KEYUP)
+            result = {"success": True, "action": "key_up", "keys": keys}
+        else:
+            result = {"success": False, "error": f"未知的 press action: {action}"}
+    except Exception as exc:
+        result = {"success": False, "error": str(exc)}
 
-    elif action == "key_down":
-        for vk in modifier_vks + normal_vks:
-            _key_event(vk, 0)
-        return {"success": True, "action": "key_down", "keys": keys}
+    if verify and result.get("success"):
+        time.sleep(_VERIFY_WAIT)
+        after = capture_signals(target_rect=target_rect)
+        result["_verify"] = compare_signals(before, after)
 
-    elif action == "key_up":
-        for vk in modifier_vks + normal_vks:
-            _key_event(vk, win32con.KEYEVENTF_KEYUP)
-        return {"success": True, "action": "key_up", "keys": keys}
-
-    else:
-        raise RuntimeError(f"未知的 press action: {action}")
+    return result
 
 
 def select_text(cid: int, start: int, end: int,
-                cache: Optional[ControlCache] = None) -> dict:
-    """选中指定控件内第 start 到第 end 个字符。"""
+                verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+    """选中指定控件内第 start 到第 end 个字符。信号: foreground, visual。"""
     control = _get_control_by_id(cid, cache)
+
+    if verify:
+        target_rect = _control_rect(control)
+        before = capture_signals(target_rect=target_rect)
+
     _precheck(control)
 
     # 尝试 TextPattern
@@ -335,28 +408,24 @@ def select_text(cid: int, start: int, end: int,
         import uiautomation as uia
         tp = control.GetPattern(uia.PatternId.TextPattern)
         if tp:
-            # 获取文档范围
             doc_range = tp.DocumentRange
-            # 创建起始和结束范围
-            start_range = doc_range.GetEnclosingElement()
-            # 通过 MoveEndpointByUnit 移动端点
             range_obj = doc_range.Clone()
             range_obj.MoveEndpointByUnit(
                 uia.TextPatternRangeEndpoint.Start,
-                uia.TextUnit.Character,
-                start
-            )
+                uia.TextUnit.Character, start)
             range_obj.MoveEndpointByUnit(
                 uia.TextPatternRangeEndpoint.End,
-                uia.TextUnit.Character,
-                end - start
-            )
+                uia.TextUnit.Character, end - start)
             range_obj.Select()
-            # 获取选中文本
             selected_text = range_obj.GetText(-1) or ""
-            return {"success": True, "action": "select", "id": cid,
-                    "start": start, "end": end, "selected": selected_text,
-                    "method": "TextPattern"}
+            result = {"success": True, "action": "select", "id": cid,
+                      "start": start, "end": end, "selected": selected_text,
+                      "method": "TextPattern"}
+            if verify:
+                time.sleep(_VERIFY_WAIT)
+                after = capture_signals(target_rect=target_rect)
+                result["_verify"] = compare_signals(before, after)
+            return result
     except Exception:
         pass
 
@@ -364,7 +433,6 @@ def select_text(cid: int, start: int, end: int,
     try:
         bb = control.BoundingRectangle
         if bb:
-            # 估算字符位置（粗略）
             cx = int(bb.left + 5 + start * 8)
             cy = int((bb.top + bb.bottom) / 2)
             cx2 = int(bb.left + 5 + end * 8)
@@ -377,16 +445,30 @@ def select_text(cid: int, start: int, end: int,
             _mouse_move(cx2, cy)
             time.sleep(0.1)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            return {"success": True, "action": "select", "id": cid,
-                    "start": start, "end": end, "method": "mouse_drag"}
+            result = {"success": True, "action": "select", "id": cid,
+                      "start": start, "end": end, "method": "mouse_drag"}
+        else:
+            result = {"success": False, "error": "无法获取控件矩形"}
     except Exception as exc:
-        raise RuntimeError(f"select_text failed: {exc}")
+        result = {"success": False, "error": str(exc)}
+
+    if verify and result.get("success"):
+        time.sleep(_VERIFY_WAIT)
+        after = capture_signals(target_rect=target_rect)
+        result["_verify"] = compare_signals(before, after)
+
+    return result
 
 
 def scroll(cid: int, direction: str, amount: int = 3,
-           cache: Optional[ControlCache] = None) -> dict:
-    """对指定控件滚动。"""
+           verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+    """对指定控件滚动。信号: foreground, visual, UIA滚动位置。"""
     control = _get_control_by_id(cid, cache)
+
+    if verify:
+        target_rect = _control_rect(control)
+        before = capture_signals(target_rect=target_rect)
+
     _precheck(control)
 
     # 尝试 ScrollPattern
@@ -394,52 +476,66 @@ def scroll(cid: int, direction: str, amount: int = 3,
         import uiautomation as uia
         sp = control.GetPattern(uia.PatternId.ScrollPattern)
         if sp:
-            # ScrollPattern.Scroll(horizontalAmount, verticalAmount)
-            # 参数为 ScrollAmount 枚举值
             h_amount = uia.ScrollAmount.NoAmount
             v_amount = uia.ScrollAmount.NoAmount
-            scroll_unit = uia.ScrollAmount.SmallIncrement if amount > 0 else uia.ScrollAmount.SmallDecrement
             if direction in ("down", "right"):
                 scroll_unit = uia.ScrollAmount.SmallIncrement
             else:
                 scroll_unit = uia.ScrollAmount.SmallDecrement
-
             if direction in ("up", "down"):
                 v_amount = scroll_unit
             elif direction in ("left", "right"):
                 h_amount = scroll_unit
-
             sp.Scroll(h_amount, v_amount)
-            return {"success": True, "action": "scroll", "id": cid,
-                    "direction": direction, "amount": amount, "method": "ScrollPattern"}
+            result = {"success": True, "action": "scroll", "id": cid,
+                      "direction": direction, "amount": amount, "method": "ScrollPattern"}
+            if verify:
+                time.sleep(_VERIFY_WAIT)
+                after = capture_signals(target_rect=target_rect)
+                result["_verify"] = compare_signals(before, after)
+            return result
     except Exception:
         pass
 
     # fallback: 鼠标滚轮
-    x, y = _clickable_point(control)
-    wheel_amount = amount * 120 if direction in ("up", "down") else amount * 120
-    if direction in ("up", "left"):
-        wheel_amount = -wheel_amount
-    _mouse_wheel(x, y, wheel_amount)
-    return {"success": True, "action": "scroll", "id": cid,
-            "direction": direction, "amount": amount, "method": "mouse_wheel"}
+    try:
+        x, y = _clickable_point(control)
+        wheel_amount = amount * 120 if direction in ("up", "down") else amount * 120
+        if direction in ("up", "left"):
+            wheel_amount = -wheel_amount
+        _mouse_wheel(x, y, wheel_amount)
+        result = {"success": True, "action": "scroll", "id": cid,
+                  "direction": direction, "amount": amount, "method": "mouse_wheel"}
+    except Exception as exc:
+        result = {"success": False, "error": str(exc)}
+
+    if verify and result.get("success"):
+        time.sleep(_VERIFY_WAIT)
+        after = capture_signals(target_rect=target_rect)
+        result["_verify"] = compare_signals(before, after)
+
+    return result
 
 
 def window_action(action: str, hwnd: Optional[int] = None,
                   x: Optional[int] = None, y: Optional[int] = None,
-                  w: Optional[int] = None, h: Optional[int] = None) -> dict:
+                  w: Optional[int] = None, h: Optional[int] = None,
+                  verify: bool = True) -> dict:
     """
-    窗口管理操作。
+    窗口管理操作。信号: foreground, title, visual(窗口区域)。
     action: min/max/restore/close/focus/set_topmost/unset_topmost/move/resize
     """
     import win32gui
     import win32con
 
     if hwnd is None:
-        # 获取当前活跃窗口句柄
         hwnd = win32gui.GetForegroundWindow()
         if hwnd == 0:
             raise RuntimeError("无法获取当前活跃窗口")
+
+    if verify:
+        target_rect = _window_rect_by_hwnd(hwnd)
+        before = capture_signals(target_rect=target_rect)
 
     if action == "min":
         win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
@@ -471,4 +567,25 @@ def window_action(action: str, hwnd: Optional[int] = None,
     else:
         raise RuntimeError(f"未知的 window action: {action}")
 
-    return {"success": True, "action": action, "hwnd": hwnd}
+    result = {"success": True, "action": action, "hwnd": hwnd}
+
+    if verify:
+        time.sleep(_VERIFY_WAIT)
+        after = capture_signals(target_rect=target_rect)
+        result["_verify"] = compare_signals(before, after)
+
+    return result
+
+
+# ── 辅助 ────────────────────────────────────────────────────────
+
+def _union_rects(rects: list) -> Optional[tuple]:
+    """合并多个矩形为最小外接矩形。"""
+    valid = [r for r in rects if r]
+    if not valid:
+        return None
+    left = min(r[0] for r in valid)
+    top = min(r[1] for r in valid)
+    right = max(r[2] for r in valid)
+    bottom = max(r[3] for r in valid)
+    return (left, top, right, bottom)
