@@ -12,7 +12,8 @@ logger = logging.getLogger("deskhand.tools.drag")
 
 
 def desk_drag(from_id: int, to_id: Optional[int] = None,
-              to_x: Optional[int] = None, to_y: Optional[int] = None) -> str:
+              to_x: Optional[int] = None, to_y: Optional[int] = None,
+              verify: str = "full") -> str:
     """
     拖拽操作。
 
@@ -20,9 +21,10 @@ def desk_drag(from_id: int, to_id: Optional[int] = None,
     :param to_id: 目标控件 id（与 to_x/to_y 二选一）
     :param to_x: 目标 x 坐标
     :param to_y: 目标 y 坐标
+    :param verify: full截屏对比/light仅前景/none跳过
     """
     try:
-        result = drag(from_id, to_id=to_id, to_x=to_x, to_y=to_y)
+        result = drag(from_id, to_id=to_id, to_x=to_x, to_y=to_y, verify=verify)
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)

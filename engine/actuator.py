@@ -195,14 +195,15 @@ def _verify_failure(error_msg: str) -> dict:
 # ── 公开 API ───────────────────────────────────────────────────
 
 def click(cid: int, button: str = "left", double: bool = False,
-          hover: bool = False, verify: bool = True,
+          hover: bool = False, verify: str = "full",
           cache: Optional[ControlCache] = None) -> dict:
-    """点击/悬停指定控件。信号: foreground, cursor, title, visual, focus。"""
+    """点击/悬停指定控件。verify=full/light/none。light跳过像素diff但保留foreground。"""
     control = _get_control_by_id(cid, cache)
     _precheck(control)
 
-    if verify:
-        target_rect = _control_rect(control)
+    do_screenshot = (verify == "full")
+    if verify != "none":
+        target_rect = _control_rect(control) if do_screenshot else None
         before = capture_signals(target_rect=target_rect)
 
     x, y = _clickable_point(control)
@@ -215,9 +216,10 @@ def click(cid: int, button: str = "left", double: bool = False,
         result = {"success": True, "action": "click", "id": cid, "button": button,
                   "double": double, "x": x, "y": y}
 
-    if verify:
+    if verify != "none":
         time.sleep(_VERIFY_WAIT)
-        after = capture_signals(target_rect=target_rect)
+        target_rect2 = _control_rect(control) if do_screenshot else None
+        after = capture_signals(target_rect=target_rect2)
         result["_verify"] = compare_signals(before, after)
 
     return result
@@ -225,7 +227,7 @@ def click(cid: int, button: str = "left", double: bool = False,
 
 def drag(from_id: int, to_id: Optional[int] = None,
          to_x: Optional[int] = None, to_y: Optional[int] = None,
-         verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+         verify: str = "full", cache: Optional[ControlCache] = None) -> dict:
     """拖拽：从控件 A 拖到控件 B 或指定坐标。信号: foreground, cursor, visual。"""
     from_control = _get_control_by_id(from_id, cache)
     _precheck(from_control)
@@ -235,7 +237,7 @@ def drag(from_id: int, to_id: Optional[int] = None,
         _precheck(to_control)
 
     # 确定目标区域（用于验证截图）
-    if verify:
+    if verify != "none":
         rects = [_control_rect(from_control)]
         if to_id is not None:
             rects.append(_control_rect(to_control))
@@ -264,7 +266,7 @@ def drag(from_id: int, to_id: Optional[int] = None,
     result = {"success": True, "action": "drag", "from_id": from_id,
               "to_id": to_id, "to_x": x2, "to_y": y2}
 
-    if verify:
+    if verify != "none":
         time.sleep(_VERIFY_WAIT)
         after = capture_signals(target_rect=target_rect)
         result["_verify"] = compare_signals(before, after)
@@ -273,12 +275,12 @@ def drag(from_id: int, to_id: Optional[int] = None,
 
 
 def type_text(cid: int, text: str, line: Optional[int] = None,
-              verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+              verify: str = "full", cache: Optional[ControlCache] = None) -> dict:
     """向控件输入文本。信号: foreground, title, visual, 控件值。"""
     control = _get_control_by_id(cid, cache)
     _precheck(control)
 
-    if verify:
+    if verify != "none":
         target_rect = _control_rect(control)
         before = capture_signals(target_rect=target_rect)
 
@@ -301,7 +303,7 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
                 vp.SetValue(new_val)
                 result = {"success": True, "action": "type", "id": cid,
                           "line": line, "text": text, "lines_affected": len(lines)}
-                if verify:
+                if verify != "none":
                     time.sleep(_VERIFY_WAIT)
                     after = capture_signals(target_rect=target_rect)
                     result["_verify"] = compare_signals(before, after)
@@ -323,11 +325,11 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
                   "text": text, "method": "SendKeys"}
     except Exception as exc:
         result = {"success": False, "error": str(exc)}
-        if verify:
+        if verify != "none":
             result["_verify"] = _verify_failure(str(exc))
         return result
 
-    if verify:
+    if verify != "none":
         time.sleep(_VERIFY_WAIT)
         after = capture_signals(target_rect=target_rect)
         result["_verify"] = compare_signals(before, after)
@@ -336,9 +338,9 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
 
 
 def press(keys: list[str], action: str = "press",
-          verify: bool = True) -> dict:
+          verify: str = "full") -> dict:
     """发送键盘按键。信号: foreground, title, visual(活跃窗口区域)。"""
-    if verify:
+    if verify != "none":
         target_rect = _active_window_rect()
         before = capture_signals(target_rect=target_rect)
 
@@ -379,7 +381,7 @@ def press(keys: list[str], action: str = "press",
                     vk = ord(k.upper())
             else:
                 result = {"success": False, "error": f"未知按键: {k}"}
-                if verify:
+                if verify != "none":
                     result["_verify"] = _verify_failure(f"未知按键: {k}")
                 return result
         if kl in ("ctrl", "alt", "shift", "win"):
@@ -428,12 +430,12 @@ def press(keys: list[str], action: str = "press",
 
 
 def select_text(cid: int, start: int, end: int,
-                verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+                verify: str = "full", cache: Optional[ControlCache] = None) -> dict:
     """选中指定控件内第 start 到第 end 个字符。信号: foreground, visual。"""
     control = _get_control_by_id(cid, cache)
     _precheck(control)
 
-    if verify:
+    if verify != "none":
         target_rect = _control_rect(control)
         before = capture_signals(target_rect=target_rect)
 
@@ -455,7 +457,7 @@ def select_text(cid: int, start: int, end: int,
             result = {"success": True, "action": "select", "id": cid,
                       "start": start, "end": end, "selected": selected_text,
                       "method": "TextPattern"}
-            if verify:
+            if verify != "none":
                 time.sleep(_VERIFY_WAIT)
                 after = capture_signals(target_rect=target_rect)
                 result["_verify"] = compare_signals(before, after)
@@ -497,12 +499,12 @@ def select_text(cid: int, start: int, end: int,
 
 
 def scroll(cid: int, direction: str, amount: int = 3,
-           verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
+           verify: str = "full", cache: Optional[ControlCache] = None) -> dict:
     """对指定控件滚动。信号: foreground, visual, UIA滚动位置。"""
     control = _get_control_by_id(cid, cache)
     _precheck(control)
 
-    if verify:
+    if verify != "none":
         target_rect = _control_rect(control)
         before = capture_signals(target_rect=target_rect)
 
@@ -524,7 +526,7 @@ def scroll(cid: int, direction: str, amount: int = 3,
             sp.Scroll(h_amount, v_amount)
             result = {"success": True, "action": "scroll", "id": cid,
                       "direction": direction, "amount": amount, "method": "ScrollPattern"}
-            if verify:
+            if verify != "none":
                 time.sleep(_VERIFY_WAIT)
                 after = capture_signals(target_rect=target_rect)
                 result["_verify"] = compare_signals(before, after)
@@ -557,7 +559,7 @@ def scroll(cid: int, direction: str, amount: int = 3,
 def window_action(action: str, hwnd: Optional[int] = None,
                   x: Optional[int] = None, y: Optional[int] = None,
                   w: Optional[int] = None, h: Optional[int] = None,
-                  verify: bool = True) -> dict:
+                  verify: str = "full") -> dict:
     """
     窗口管理操作。信号: foreground, title, visual(窗口区域)。
     action: min/max/restore/close/focus/set_topmost/unset_topmost/move/resize
@@ -570,7 +572,7 @@ def window_action(action: str, hwnd: Optional[int] = None,
         if hwnd == 0:
             raise RuntimeError("无法获取当前活跃窗口")
 
-    if verify:
+    if verify != "none":
         target_rect = _window_rect_by_hwnd(hwnd)
         before = capture_signals(target_rect=target_rect)
 
@@ -606,7 +608,7 @@ def window_action(action: str, hwnd: Optional[int] = None,
 
     result = {"success": True, "action": action, "hwnd": hwnd}
 
-    if verify:
+    if verify != "none":
         time.sleep(_VERIFY_WAIT)
         # close/min 后窗口可能已销毁，用新的前台窗口 rect 采集 after
         if action in ("close", "min"):

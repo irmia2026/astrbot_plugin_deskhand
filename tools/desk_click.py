@@ -11,7 +11,7 @@ logger = logging.getLogger("deskhand.tools.click")
 
 
 def desk_click(id: int, button: str = "left", double: bool = False,
-               hover: bool = False) -> str:
+               hover: bool = False, verify: str = "full") -> str:
     """
     点击或悬停指定控件。
 
@@ -19,9 +19,10 @@ def desk_click(id: int, button: str = "left", double: bool = False,
     :param button: left/right/middle，默认 left
     :param double: 是否双击，默认 False
     :param hover: 是否仅悬停（移动鼠标不点击），默认 False
+    :param verify: full截屏对比/light仅前景/none跳过
     """
     try:
-        result = click(id, button=button, double=double, hover=hover)
+        result = click(id, button=button, double=double, hover=hover, verify=verify)
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)

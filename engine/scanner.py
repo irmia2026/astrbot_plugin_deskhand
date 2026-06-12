@@ -30,21 +30,38 @@ MAX_CHILDREN = 120
 SCAN_TIMEOUT_SEC = 5.0
 
 
+# 模块级配置缓存（启动时读取一次）
+_config_cache: Optional[dict] = None
+
+# 交互控件角色白名单（mode="interactive" 时保留）
+_INTERACTIVE_ROLES = {
+    "ButtonControl", "EditControl", "ListItemControl", "MenuItemControl",
+    "CheckBoxControl", "ComboBoxControl", "TabItemControl", "TreeItemControl",
+    "HyperlinkControl", "RadioButtonControl", "SliderControl", "SpinnerControl",
+    "ToggleControl", "SplitButtonControl", "DataItemControl", "HeaderControl",
+    "ThumbControl", "CalendarControl", "DataGridControl",
+    "WindowControl",  # 顶层窗口始终保留
+}
+
+
 def _get_config() -> dict:
-    """尝试从 AstrBot 配置读取参数，失败返回空 dict。"""
+    """模块级缓存读取配置，仅首次读文件。"""
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
     try:
-        # AstrBot 配置通常通过环境或全局上下文获取
-        # 这里尝试读取已知的配置路径
         import json
         import os
         config_path = os.environ.get("ASTRBOT_CONFIG_PATH", "")
         if config_path and os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            return cfg.get("astrbot_plugin_deskhand", {})
+            _config_cache = cfg.get("astrbot_plugin_deskhand", {})
+        else:
+            _config_cache = {}
     except Exception:
-        pass
-    return {}
+        _config_cache = {}
+    return _config_cache
 
 
 def _get_scan_limits() -> tuple[int, int, float]:
@@ -116,10 +133,12 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
                  start_time: Optional[float] = None,
                  max_depth: int = MAX_DEPTH,
                  max_children: int = MAX_CHILDREN,
-                 scan_timeout: float = SCAN_TIMEOUT_SEC) -> Optional[dict]:
+                 scan_timeout: float = SCAN_TIMEOUT_SEC,
+                 mode: Optional[str] = None) -> Optional[dict]:
     """
     递归采集单个控件及其子树。
 
+    mode="interactive" 时只保留交互控件角色，过滤 PaneControl/GroupControl 等。
     返回结构化 dict，超时或遇到不可遍历控件时返回 None（子树截断）。
     """
     if start_time is None:
@@ -172,27 +191,35 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
         "children": [],
     }
 
-    # 递归采集子控件 — 即使是 Chromium 宿主也正常递归
+    # 递归采集子控件
     children = _safe_get_children(control, max_children)
     for child in children:
         if len(node["children"]) >= max_children:
             logger.debug("Max children (%d) reached at depth %d", max_children, depth)
             break
         child_node = scan_control(child, cache, depth + 1, start_time,
-                                  max_depth, max_children, scan_timeout)
+                                  max_depth, max_children, scan_timeout, mode)
         if child_node is not None:
             node["children"].append(child_node)
+
+    # mode="interactive": 过滤纯结构节点
+    if mode == "interactive" and depth > 0:
+        if role not in _INTERACTIVE_ROLES and not node["children"]:
+            return None
 
     return node
 
 
 def scan_active_window(cache: Optional[ControlCache] = None,
-                       target: Optional[str] = None) -> Optional[dict]:
+                       target: Optional[str] = None,
+                       mode: Optional[str] = None) -> Optional[dict]:
     """
     采集控件树。
 
     target=None 时扫描当前活跃窗口。
     target="QQ" 时扫描名称包含 target 的窗口（模糊匹配）。
+    mode="interactive" 只返回可交互控件，过滤结构节点。
+    mode="coords" 只返回窗口 name+rect 列表，不递归子树。
     """
     if cache is None:
         cache = get_global_cache()
@@ -259,15 +286,34 @@ def scan_active_window(cache: Optional[ControlCache] = None,
             logger.error("Failed to find active window: %s", exc)
             return None
 
+    # mode="coords": 仅返回窗口 rect 列表
+    if mode == "coords":
+        windows = []
+        try:
+            all_windows = root.GetChildren()
+            for w in all_windows[:60]:
+                try:
+                    wname = getattr(w, "Name", "") or ""
+                    wrect = _safe_rect(w)
+                    if wname or wrect:
+                        windows.append({"name": wname, "rect": wrect})
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        elapsed = time.monotonic() - start_time
+        logger.info("Coords scan: %d windows in %.2fs", len(windows), elapsed)
+        return {"mode": "coords", "windows": windows}
+
     # 采集窗口控件树
     window_node = scan_control(active_window, cache, 0, start_time,
-                               max_depth, max_children, scan_timeout)
+                               max_depth, max_children, scan_timeout, mode)
     if window_node is None:
         logger.error("Failed to scan active window")
         return None
 
     elapsed = time.monotonic() - start_time
-    logger.info("Scanned active window in %.2fs, root id=%d role=%s",
-                elapsed, window_node["id"], window_node["role"])
+    logger.info("Scanned active window in %.2fs, root id=%d role=%s mode=%s",
+                elapsed, window_node["id"], window_node["role"], mode or "full")
 
     return window_node

@@ -12,18 +12,24 @@ from ..engine.cache import get_global_cache
 logger = logging.getLogger("deskhand.tools.state")
 
 
-def desk_state(target: Optional[str] = None) -> str:
+def desk_state(target: Optional[str] = None, mode: Optional[str] = None) -> str:
     """
     采集控件树。
 
     target=None 时扫描全桌面（当前活跃窗口）。
     target="QQ" 时只扫描名称包含 "QQ" 的窗口（模糊匹配，不区分大小写）。
+    mode="interactive" 只返回可交互控件（Button/Edit/ListItem 等），过滤纯结构节点。
+    mode="coords" 只返回窗口 name+rect 列表，不递归子树——适合移动/排列窗口场景。
     """
     cache = get_global_cache()
-    tree = scan_active_window(cache, target=target)
+    tree = scan_active_window(cache, target=target, mode=mode)
     if tree is None:
         msg = f"未找到匹配 '{target}' 的窗口" if target else "无法采集控件树"
         return json.dumps({"error": msg}, ensure_ascii=False)
+
+    # mode="coords": 直接返回窗口列表
+    if tree.get("mode") == "coords":
+        return json.dumps(tree, ensure_ascii=False, indent=2)
 
     # 截断输出以控制 token 长度
     def _truncate(node: dict, depth: int = 0) -> dict:
