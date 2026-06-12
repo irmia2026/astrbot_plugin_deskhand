@@ -68,8 +68,14 @@ class DeskHandPlugin(Star):
         tools = [
             FunctionTool(
                 name="desk_state",
-                description="采集当前活跃窗口的控件树，返回结构化 JSON。每个控件含 id/role/name/value/rect/enabled。",
-                parameters={"type": "object", "properties": {}, "required": []},
+                description="采集当前活跃窗口的控件树，返回结构化 JSON。每个控件含 id/role/name/value/rect/enabled。target 参数可按窗口名过滤（如 target=\"QQ\" 仅扫描 QQ 窗口），大幅减少输出 token。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "窗口名模糊匹配（不区分大小写），不传则扫描全桌面"}
+                    },
+                    "required": []
+                },
                 handler=_desk_state_handler,
             ),
             FunctionTool(
