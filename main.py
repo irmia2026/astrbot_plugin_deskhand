@@ -33,8 +33,8 @@ def _err(msg: str) -> str:
 
 # ── 9 个模块级 handler（普通函数，AstrBot 会通过 functools.partial 注入 star_cls） ──
 
-async def _desk_state_handler(self, event, **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_state))
+async def _desk_state_handler(self, event, target: str = None, **kwargs) -> str:
+    return _ok(await asyncio.to_thread(desk_state, target=target))
 
 async def _desk_click_handler(self, event, id: int, button: str = "left", double: bool = False, hover: bool = False, **kwargs) -> str:
     return _ok(await asyncio.to_thread(desk_click, id, button, double, hover))
