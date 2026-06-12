@@ -8,6 +8,7 @@ verifier.py — 操作后多维信号自验证框架。
 - compare_signals(before, after) → dict
 """
 
+import io
 import time
 import logging
 from typing import Optional
@@ -28,8 +29,9 @@ def capture_signals(target_rect: Optional[tuple] = None) -> dict:
 
     target_rect: (left, top, right, bottom) 或 None。
                  仅在提供时才截取该区域截图。
+    所有异常静默捕获，errors 列表记录失败项。
     """
-    sig = {}
+    sig = {"errors": []}
 
     # 1. 前台窗口句柄 + 标题
     try:
@@ -41,11 +43,13 @@ def capture_signals(target_rect: Optional[tuple] = None) -> dict:
                 sig["foreground_title"] = win32gui.GetWindowText(hwnd)
             except Exception:
                 sig["foreground_title"] = None
+                sig["errors"].append("foreground_title")
         else:
             sig["foreground_title"] = None
     except Exception:
         sig["foreground_hwnd"] = None
         sig["foreground_title"] = None
+        sig["errors"].append("foreground")
 
     # 2. 光标位置
     try:
@@ -56,6 +60,7 @@ def capture_signals(target_rect: Optional[tuple] = None) -> dict:
     except Exception:
         sig["cursor_x"] = None
         sig["cursor_y"] = None
+        sig["errors"].append("cursor")
 
     # 3. UIA 控件树快照（depth=2，仅顶层+直接子节点）
     try:
@@ -65,15 +70,24 @@ def capture_signals(target_rect: Optional[tuple] = None) -> dict:
     except Exception:
         sig["uia_root_id"] = None
         sig["uia_key_controls"] = None
+        sig["errors"].append("uia_snapshot")
 
-    # 4. 目标区域截图（仅在 target_rect 提供时）
+    # 4. 目标区域截图（仅在 target_rect 提供且有效时）
     if target_rect is not None:
-        try:
-            from PIL import ImageGrab
-            img = ImageGrab.grab(bbox=target_rect)
-            sig["screenshot_bytes"] = _img_to_bytes(img)
-        except Exception:
+        if _is_valid_rect(target_rect):
+            try:
+                from PIL import ImageGrab
+                img = ImageGrab.grab(bbox=target_rect)
+                try:
+                    sig["screenshot_bytes"] = _img_to_bytes(img)
+                finally:
+                    img.close()
+            except Exception:
+                sig["screenshot_bytes"] = None
+                sig["errors"].append("screenshot")
+        else:
             sig["screenshot_bytes"] = None
+            sig["errors"].append("screenshot_invalid_rect")
     else:
         sig["screenshot_bytes"] = None
 
@@ -92,7 +106,6 @@ def _light_uia_snapshot() -> dict:
         root = uia.GetRootControl()
         focused = uia.GetFocusedControl()
         if focused is None:
-            # fallback
             children = root.GetChildren()
             focused = children[0] if children else None
         if focused is None:
@@ -110,7 +123,7 @@ def _light_uia_snapshot() -> dict:
                 break
         top_window = walk
 
-        # 获取 RuntimeId
+        # 获取 RuntimeId（用 hash 做轻量标识，不与 cache 绑定）
         try:
             rt = top_window.GetRuntimeId()
             root_id = hash(tuple(rt)) if rt else None
@@ -172,8 +185,14 @@ def compare_signals(before: dict, after: dict) -> dict:
     计算操作前后信号差异。
 
     返回结构化 dict，LLM 可直接推理。
+    包含 errors 字段汇总采集失败项。
     """
-    diff = {}
+    diff = {"errors": []}
+
+    # 汇总采集错误
+    diff["errors"].extend(before.get("errors", []))
+    diff["errors"].extend(after.get("errors", []))
+    diff["errors"] = list(set(diff["errors"]))  # 去重
 
     # 前台窗口变化
     diff["foreground_changed"] = (before.get("foreground_hwnd") != after.get("foreground_hwnd"))
@@ -229,14 +248,20 @@ def compare_signals(before: dict, after: dict) -> dict:
     img_b = _bytes_to_img(before.get("screenshot_bytes"))
     img_a = _bytes_to_img(after.get("screenshot_bytes"))
     if img_b is not None and img_a is not None:
-        visual = _pixel_diff(img_b, img_a)
-        diff["visual_changed"] = visual["changed"]
-        diff["visual_diff_percent"] = visual["percent"]
-        diff["visual_diff_region"] = visual["region"]
+        try:
+            visual = _pixel_diff(img_b, img_a)
+            diff["visual_changed"] = visual["changed"]
+            diff["visual_diff_percent"] = visual["percent"]
+            diff["visual_diff_region"] = visual["region"]
+            diff["visual_size_changed"] = visual.get("size_changed", False)
+        finally:
+            img_b.close()
+            img_a.close()
     else:
         diff["visual_changed"] = None
         diff["visual_diff_percent"] = None
         diff["visual_diff_region"] = None
+        diff["visual_size_changed"] = None
 
     return diff
 
@@ -245,52 +270,67 @@ def _pixel_diff(img_before: Image.Image, img_after: Image.Image,
                 threshold: int = _DIFF_THRESHOLD) -> dict:
     """两张图逐像素对比，返回变化统计。"""
     if img_before.size != img_after.size:
-        return {"changed": True, "percent": 100.0, "region": None}
+        return {"changed": True, "percent": None, "region": None, "size_changed": True}
 
     # 转为灰度图加速对比
     try:
         gb = img_before.convert("L")
         ga = img_after.convert("L")
     except Exception:
-        return {"changed": None, "percent": None, "region": None}
+        return {"changed": None, "percent": None, "region": None, "size_changed": False}
 
-    pb = gb.load()
-    pa = ga.load()
-    w, h = gb.size
-    total = w * h
+    try:
+        pb = gb.load()
+        pa = ga.load()
+        w, h = gb.size
+        total = w * h
 
-    changed = 0
-    min_x, min_y, max_x, max_y = w, h, 0, 0
+        changed = 0
+        min_x, min_y, max_x, max_y = w, h, 0, 0
 
-    for x in range(w):
-        for y in range(h):
-            if abs(pb[x, y] - pa[x, y]) > threshold:
-                changed += 1
-                if x < min_x:
-                    min_x = x
-                if y < min_y:
-                    min_y = y
-                if x > max_x:
-                    max_x = x
-                if y > max_y:
-                    max_y = y
+        for x in range(w):
+            for y in range(h):
+                if abs(pb[x, y] - pa[x, y]) > threshold:
+                    changed += 1
+                    if x < min_x:
+                        min_x = x
+                    if y < min_y:
+                        min_y = y
+                    if x > max_x:
+                        max_x = x
+                    if y > max_y:
+                        max_y = y
 
-    if changed == 0:
-        return {"changed": False, "percent": 0.0, "region": None}
+        if changed == 0:
+            return {"changed": False, "percent": 0.0, "region": None, "size_changed": False}
 
-    percent = round(changed / total * 100, 2)
-    region = {"left": min_x, "top": min_y, "right": max_x, "bottom": max_y}
-    return {"changed": True, "percent": percent, "region": region}
+        percent = round(changed / total * 100, 2)
+        # region 边界 +1 以包含最后一个变化像素
+        region = {"left": min_x, "top": min_y, "right": max_x + 1, "bottom": max_y + 1}
+        return {"changed": True, "percent": percent, "region": region, "size_changed": False}
+    finally:
+        gb.close()
+        ga.close()
 
 
 # ── 辅助 ────────────────────────────────────────────────────────
 
+def _is_valid_rect(rect: tuple) -> bool:
+    """检查矩形是否有效（left < right, top < bottom, 面积 > 0）。"""
+    if rect is None or len(rect) != 4:
+        return False
+    left, top, right, bottom = rect
+    return left < right and top < bottom and (right - left) > 0 and (bottom - top) > 0
+
+
 def _img_to_bytes(img: Image.Image) -> Optional[bytes]:
     try:
-        import io
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
+        try:
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        finally:
+            buf.close()
     except Exception:
         return None
 
@@ -299,7 +339,6 @@ def _bytes_to_img(data) -> Optional[Image.Image]:
     if data is None:
         return None
     try:
-        import io
         return Image.open(io.BytesIO(data))
     except Exception:
         return None
@@ -312,13 +351,14 @@ def _fmt_hwnd(hwnd) -> Optional[str]:
 
 
 def _get_focused_state(key_controls) -> Optional[dict]:
-    """从 key_controls 中找获焦控件。"""
+    """从 key_controls 中找获焦控件。None 表示采集失败。"""
     if key_controls is None:
         return None
     for ctrl in key_controls:
         if ctrl and ctrl.get("has_focus"):
             return {"role": ctrl.get("role"), "name": ctrl.get("name")}
-    return {"role": None, "name": None}
+    # 明确返回 "无焦点控件" 而非 None
+    return {"role": None, "name": None, "status": "no_focus"}
 
 
 def _get_first_value(key_controls) -> Optional[str]:
@@ -327,6 +367,5 @@ def _get_first_value(key_controls) -> Optional[str]:
         return None
     for ctrl in key_controls:
         if ctrl and ctrl.get("role") in ("EditControl", "DocumentControl"):
-            # 值已通过 ValuePattern 采集
             return ctrl.get("value")
     return None

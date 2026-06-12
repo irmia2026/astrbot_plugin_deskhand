@@ -44,7 +44,10 @@ def desk_screenshot(annotate: bool = False) -> str:
         ts = time.strftime("%Y%m%d_%H%M%S")
         filename = f"screenshot_{ts}.png"
         filepath = os.path.join(_SCREENSHOT_DIR, filename)
-        img.save(filepath, "PNG")
+        try:
+            img.save(filepath, "PNG")
+        finally:
+            img.close()
 
         size_kb = os.path.getsize(filepath) // 1024
 

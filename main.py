@@ -27,10 +27,6 @@ def _ok(data) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
 
 
-def _err(msg: str) -> str:
-    return json.dumps({"ok": False, "error": msg}, ensure_ascii=False)
-
-
 # ── 9 个模块级 handler（普通函数，AstrBot 会通过 functools.partial 注入 star_cls） ──
 
 async def _desk_state_handler(self, event, target: str = None, **kwargs) -> str:
@@ -68,11 +64,11 @@ class DeskHandPlugin(Star):
         tools = [
             FunctionTool(
                 name="desk_state",
-                description="采集当前活跃窗口的控件树，返回结构化 JSON。每个控件含 id/role/name/value/rect/enabled。target 参数可按窗口名过滤（如 target=\"QQ\" 仅扫描 QQ 窗口），大幅减少输出 token。",
+                description="扫描窗口控件树。target=窗口名可过滤（如'QQ'），不传则扫全桌面。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string", "description": "窗口名模糊匹配（不区分大小写），不传则扫描全桌面"}
+                        "target": {"type": "string", "description": "窗口名模糊匹配，不传则扫全桌面"}
                     },
                     "required": []
                 },
@@ -80,14 +76,14 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_click",
-                description="点击或悬停指定控件。id 为 desk_state 返回的控件 id。button=left/right/middle，double=True 双击，hover=True 悬停不移开。",
+                description="点击/悬停控件。id来自desk_state。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "id": {"type": "integer", "description": "控件 id"},
-                        "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "鼠标按键，默认 left"},
-                        "double": {"type": "boolean", "description": "是否双击，默认 false"},
-                        "hover": {"type": "boolean", "description": "悬停不移开，默认 false"},
+                        "id": {"type": "integer"},
+                        "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                        "double": {"type": "boolean"},
+                        "hover": {"type": "boolean"},
                     },
                     "required": ["id"],
                 },
@@ -95,13 +91,13 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_type",
-                description="向控件输入文本，可指定行号修改单行内容。",
+                description="向控件输入文本。line=N修改第N行。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "id": {"type": "integer", "description": "控件 id"},
-                        "text": {"type": "string", "description": "要输入的文本"},
-                        "line": {"type": "integer", "description": "可选，行号（修改该行内容）"},
+                        "id": {"type": "integer"},
+                        "text": {"type": "string"},
+                        "line": {"type": "integer"},
                     },
                     "required": ["id", "text"],
                 },
@@ -109,12 +105,12 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_press",
-                description="发送键盘按键组合。keys 如 ['Ctrl', 'c']，action=press/hold/release。",
+                description="发送按键组合。如['Ctrl','c']。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "keys": {"type": "array", "items": {"type": "string"}, "description": "按键列表"},
-                        "action": {"type": "string", "enum": ["press", "hold", "release"], "description": "动作类型，默认 press"},
+                        "keys": {"type": "array", "items": {"type": "string"}},
+                        "action": {"type": "string", "enum": ["press", "hold", "release"]},
                     },
                     "required": ["keys"],
                 },
@@ -122,14 +118,14 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_drag",
-                description="拖拽操作：from_id 拖到 to_id 或 (to_x, to_y) 坐标。",
+                description="拖拽：from_id到to_id或(to_x,to_y)。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "from_id": {"type": "integer", "description": "起始控件 id"},
-                        "to_id": {"type": "integer", "description": "目标控件 id（与坐标二选一）"},
-                        "to_x": {"type": "integer", "description": "目标 X 坐标"},
-                        "to_y": {"type": "integer", "description": "目标 Y 坐标"},
+                        "from_id": {"type": "integer"},
+                        "to_id": {"type": "integer"},
+                        "to_x": {"type": "integer"},
+                        "to_y": {"type": "integer"},
                     },
                     "required": ["from_id"],
                 },
@@ -137,13 +133,13 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_scroll",
-                description="对指定控件滚动。direction=up/down，amount 为滚动量（默认 3）。",
+                description="对控件滚动。direction=up/down/left/right。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "id": {"type": "integer", "description": "控件 id"},
-                        "direction": {"type": "string", "enum": ["up", "down"], "description": "滚动方向"},
-                        "amount": {"type": "integer", "description": "滚动量，默认 3"},
+                        "id": {"type": "integer"},
+                        "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                        "amount": {"type": "integer"},
                     },
                     "required": ["id", "direction"],
                 },
@@ -151,13 +147,13 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_select",
-                description="选中指定控件内第 start 到第 end 个字符。",
+                description="选中控件内start到end字符。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "id": {"type": "integer", "description": "控件 id"},
-                        "start": {"type": "integer", "description": "起始字符位置"},
-                        "end": {"type": "integer", "description": "结束字符位置"},
+                        "id": {"type": "integer"},
+                        "start": {"type": "integer"},
+                        "end": {"type": "integer"},
                     },
                     "required": ["id", "start", "end"],
                 },
@@ -169,12 +165,12 @@ class DeskHandPlugin(Star):
                 parameters={
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["min", "max", "restore", "close", "focus", "set_topmost", "move", "resize"], "description": "窗口操作"},
-                        "hwnd": {"type": "integer", "description": "窗口句柄（可选，默认当前窗口）"},
-                        "x": {"type": "integer", "description": "move/resize 时的 X"},
-                        "y": {"type": "integer", "description": "move/resize 时的 Y"},
-                        "w": {"type": "integer", "description": "resize 时的宽度"},
-                        "h": {"type": "integer", "description": "resize 时的高度"},
+                        "action": {"type": "string", "enum": ["min", "max", "restore", "close", "focus", "set_topmost", "move", "resize"]},
+                        "hwnd": {"type": "integer"},
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                        "w": {"type": "integer"},
+                        "h": {"type": "integer"},
                     },
                     "required": ["action"],
                 },
@@ -182,11 +178,11 @@ class DeskHandPlugin(Star):
             ),
             FunctionTool(
                 name="desk_screenshot",
-                description="截取当前屏幕，保存 PNG 文件，返回路径、分辨率、文件大小。可选标注控件边框和 id。",
+                description="截图保存PNG，返回路径。annotate=True标注控件框。",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "annotate": {"type": "boolean", "description": "是否标注控件边框和 id，默认 false"},
+                        "annotate": {"type": "boolean"},
                     },
                     "required": [],
                 },

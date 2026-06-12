@@ -162,6 +162,36 @@ def _mouse_wheel(x: int, y: int, amount: int) -> None:
     win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, amount, 0)
 
 
+# ── 失败时 _verify 的标准格式 ──────────────────────────────────
+
+def _verify_failure(error_msg: str) -> dict:
+    """操作失败时返回与成功时相同 schema 的 _verify，增加 success=false。"""
+    return {
+        "success": False,
+        "error": error_msg,
+        "foreground_changed": None,
+        "foreground_hwnd_before": None,
+        "foreground_hwnd_after": None,
+        "title_changed": None,
+        "title_before": None,
+        "title_after": None,
+        "cursor_moved": None,
+        "cursor_delta_x": None,
+        "cursor_delta_y": None,
+        "focus_changed": None,
+        "focus_before": None,
+        "focus_after": None,
+        "value_changed": None,
+        "value_before": None,
+        "value_after": None,
+        "visual_changed": None,
+        "visual_diff_percent": None,
+        "visual_diff_region": None,
+        "visual_size_changed": None,
+        "errors": ["operation_failed"],
+    }
+
+
 # ── 公开 API ───────────────────────────────────────────────────
 
 def click(cid: int, button: str = "left", double: bool = False,
@@ -169,12 +199,12 @@ def click(cid: int, button: str = "left", double: bool = False,
           cache: Optional[ControlCache] = None) -> dict:
     """点击/悬停指定控件。信号: foreground, cursor, title, visual, focus。"""
     control = _get_control_by_id(cid, cache)
+    _precheck(control)
 
     if verify:
         target_rect = _control_rect(control)
         before = capture_signals(target_rect=target_rect)
 
-    _precheck(control)
     x, y = _clickable_point(control)
 
     if hover:
@@ -198,22 +228,23 @@ def drag(from_id: int, to_id: Optional[int] = None,
          verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
     """拖拽：从控件 A 拖到控件 B 或指定坐标。信号: foreground, cursor, visual。"""
     from_control = _get_control_by_id(from_id, cache)
+    _precheck(from_control)
+
+    if to_id is not None:
+        to_control = _get_control_by_id(to_id, cache)
+        _precheck(to_control)
 
     # 确定目标区域（用于验证截图）
     if verify:
         rects = [_control_rect(from_control)]
         if to_id is not None:
-            to_control = _get_control_by_id(to_id, cache)
             rects.append(_control_rect(to_control))
         target_rect = _union_rects(rects) if any(rects) else None
         before = capture_signals(target_rect=target_rect)
 
-    _precheck(from_control)
     x1, y1 = _clickable_point(from_control)
 
     if to_id is not None:
-        to_control = _get_control_by_id(to_id, cache)
-        _precheck(to_control)
         x2, y2 = _clickable_point(to_control)
     elif to_x is not None and to_y is not None:
         x2, y2 = to_x, to_y
@@ -245,12 +276,11 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
               verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
     """向控件输入文本。信号: foreground, title, visual, 控件值。"""
     control = _get_control_by_id(cid, cache)
+    _precheck(control)
 
     if verify:
         target_rect = _control_rect(control)
         before = capture_signals(target_rect=target_rect)
-
-    _precheck(control)
 
     if line is not None:
         # 先获取当前值，修改指定行
@@ -264,6 +294,7 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
                 if 0 <= idx < len(lines):
                     lines[idx] = text
                 elif idx >= len(lines):
+                    # 补空行
                     lines.extend([""] * (idx - len(lines) + 1))
                     lines[idx] = text
                 new_val = "\n".join(lines)
@@ -282,6 +313,7 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
     import uiautomation as uia
     try:
         if line is not None:
+            # 先清空再输入
             control.SendKeys("{Ctrl}a{Delete}")
             time.sleep(0.05)
         safe_text = text.replace("{", "{{").replace("}", "}}")
@@ -292,7 +324,7 @@ def type_text(cid: int, text: str, line: Optional[int] = None,
     except Exception as exc:
         result = {"success": False, "error": str(exc)}
         if verify:
-            result["_verify"] = {"error": "操作失败，无法采集验证信号"}
+            result["_verify"] = _verify_failure(str(exc))
         return result
 
     if verify:
@@ -348,7 +380,7 @@ def press(keys: list[str], action: str = "press",
             else:
                 result = {"success": False, "error": f"未知按键: {k}"}
                 if verify:
-                    result["_verify"] = {"error": "操作失败，无法采集验证信号"}
+                    result["_verify"] = _verify_failure(f"未知按键: {k}")
                 return result
         if kl in ("ctrl", "alt", "shift", "win"):
             modifier_vks.append(vk)
@@ -389,6 +421,8 @@ def press(keys: list[str], action: str = "press",
         time.sleep(_VERIFY_WAIT)
         after = capture_signals(target_rect=target_rect)
         result["_verify"] = compare_signals(before, after)
+    elif verify and not result.get("success"):
+        result["_verify"] = _verify_failure(result.get("error", "未知错误"))
 
     return result
 
@@ -397,12 +431,11 @@ def select_text(cid: int, start: int, end: int,
                 verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
     """选中指定控件内第 start 到第 end 个字符。信号: foreground, visual。"""
     control = _get_control_by_id(cid, cache)
+    _precheck(control)
 
     if verify:
         target_rect = _control_rect(control)
         before = capture_signals(target_rect=target_rect)
-
-    _precheck(control)
 
     # 尝试 TextPattern
     try:
@@ -457,6 +490,8 @@ def select_text(cid: int, start: int, end: int,
         time.sleep(_VERIFY_WAIT)
         after = capture_signals(target_rect=target_rect)
         result["_verify"] = compare_signals(before, after)
+    elif verify and not result.get("success"):
+        result["_verify"] = _verify_failure(result.get("error", "未知错误"))
 
     return result
 
@@ -465,12 +500,11 @@ def scroll(cid: int, direction: str, amount: int = 3,
            verify: bool = True, cache: Optional[ControlCache] = None) -> dict:
     """对指定控件滚动。信号: foreground, visual, UIA滚动位置。"""
     control = _get_control_by_id(cid, cache)
+    _precheck(control)
 
     if verify:
         target_rect = _control_rect(control)
         before = capture_signals(target_rect=target_rect)
-
-    _precheck(control)
 
     # 尝试 ScrollPattern
     try:
@@ -514,6 +548,8 @@ def scroll(cid: int, direction: str, amount: int = 3,
         time.sleep(_VERIFY_WAIT)
         after = capture_signals(target_rect=target_rect)
         result["_verify"] = compare_signals(before, after)
+    elif verify and not result.get("success"):
+        result["_verify"] = _verify_failure(result.get("error", "未知错误"))
 
     return result
 
@@ -572,7 +608,16 @@ def window_action(action: str, hwnd: Optional[int] = None,
 
     if verify:
         time.sleep(_VERIFY_WAIT)
-        after = capture_signals(target_rect=target_rect)
+        # close/min 后窗口可能已销毁，用新的前台窗口 rect 采集 after
+        if action in ("close", "min"):
+            after = capture_signals(target_rect=None)  # 全屏截图
+        else:
+            # 其他操作窗口仍在，用原 rect 或更新后的 rect
+            if action in ("move", "resize"):
+                new_rect = _window_rect_by_hwnd(hwnd)
+                after = capture_signals(target_rect=new_rect)
+            else:
+                after = capture_signals(target_rect=target_rect)
         result["_verify"] = compare_signals(before, after)
 
     return result

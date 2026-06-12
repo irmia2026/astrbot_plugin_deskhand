@@ -140,7 +140,8 @@ def scan_control(control, cache: ControlCache, depth: int = 0,
         runtime_id = None
 
     if runtime_id is None:
-        return None
+        # 分配临时 id 继续扫描，不截断子树
+        runtime_id = ("__temp__", hash(control), depth)
 
     cid = cache.get_id(runtime_id)
     cache.set_control(cid, control)  # 存储 UIA 控件对象，供 actuator 直接使用
