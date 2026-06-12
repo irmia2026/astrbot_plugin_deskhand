@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
+.codegraph/
+.reasonix/
+*.html
