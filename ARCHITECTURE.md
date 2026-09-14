@@ -1,6 +1,6 @@
 # 🏗️ DeskHand v2 架构设计（视觉方案）
 
-> 版本 v2.0.0 · 2026-08 · 全面转向视觉方案
+> 版本 v2.2.1 · 2026-08 · 全面转向视觉方案
 
 ---
 
@@ -9,18 +9,19 @@
 ```
 astrbot_plugin_deskhand/
 ├── metadata.yaml              # 插件元信息
-├── main.py                    # Star 入口：配置装配 + 工具注册
+├── main.py                    # Star 入口：配置装配 + 工具注册 + 生命周期清理
 ├── requirements.txt           # Pillow / pywin32 / httpx
 ├── _conf_schema.json          # VL 模型配置 + 定位与行为开关
 ├── engine/
-│   ├── desktop.py             # 单线程执行器、DPI 感知、窗口枚举、截图
-│   ├── input.py               # win32 键鼠（UNICODE 文本注入 / shift 状态 / 水平滚轮）
+│   ├── desktop.py             # 单线程执行器、DPI 感知、窗口枚举、虚拟屏原点、hwnd 记忆
+│   ├── input.py               # win32 键鼠（SendInput UNICODE / 剪贴板粘贴 / 扫描码按键）
 │   ├── ocr.py                 # 本地 OCR：WinRT（winsdk）→ RapidOCR → 无（可插拔）
 │   ├── vl.py                  # VL 客户端：复用 irmia_vision 降级链或内置解析
 │   ├── locate.py              # 三级定位引擎 + 网格标注 + hover-verify
 │   ├── memory.py              # 元素记忆库（SQLite + aHash 图像签名）
 │   └── verify.py              # ImageChops 图像 diff + wait_for_change
-└── tools/__init__.py          # 8 个工具 + FunctionTool 注册工厂
+├── tools/__init__.py          # 9 个工具 + FunctionTool 注册工厂
+└── skills/desktop-play/       # 领域知识 SKILL.md（决策树/反模式/游戏场景须知）
 ```
 
 ## 核心设计原则
@@ -40,12 +41,12 @@ astrbot_plugin_deskhand/
 click(target="保存")
   → desktop 线程截窗口图（DPI 感知，坐标=像素）
   → L1 记忆命中？（签名汉明距离 ≤10 直接返回）
-  → L2 OCR 找文字（行级优先，词级次之）
+  → L2 OCR 找文字（跨池最佳匹配：词级精确 > 行级精确 > 包含，防同行多按钮误点）
   → L3 VL 漏斗（3×3 网格 → 裁剪 → 像素坐标，按预缩放比例换算回屏幕）
   → hover-verify：落点画红色准星，局部 320×320 截图让 VL 确认/给修正量（最多 2 次）
   → win32 分段移动 + 点击
   → ImageChops diff 前后截图（~10ms/1080p），返回 changed/percent/region
-  → 记忆库 upsert（成功 hits+1，连续失败 3 次淘汰）
+  → 记忆库 upsert（成功 hits+1 并更新坐标/签名；失败只 fails+1 不覆盖旧记忆；连续失败 3 次淘汰）
 ```
 
 ## 关键工程决策
@@ -55,9 +56,11 @@ click(target="保存")
 | 单线程 ThreadPoolExecutor 执行所有桌面操作 | 鼠标是全局共享资源，串行天然防竞态；无 COM 依赖（v1 的 UIA 线程炸弹随之消失） |
 | SetProcessDPIAware | GetWindowRect 与 ImageGrab 坐标一致（HiDPI 不错位） |
 | VL 图片预缩放到长边 768 | DeepSeek 会把图压到 ~800×800；预缩放让「模型坐标→屏幕坐标」换算确定 |
-| UNICODE 文本注入（KEYEVENTF_UNICODE） | 中文/任意字符不依赖键盘布局与输入法 |
-| VkKeyScan 保留 shift 状态位 | "!" 等字符正确按下 Shift（v1 的 bug） |
-| MOUSEEVENTF_HWHEEL | 水平滚动用水平轮（v1 用垂直轮） |
+| UNICODE 文本注入（SendInput KEYEVENTF_UNICODE）+ 中文走剪贴板粘贴 | keybd_event 实测打不出字；剪贴板通道对中文 100% 可靠（含保存/恢复） |
+| 按键走扫描码通道（KEYEVENTF_SCANCODE + 扩展键标记） | SDL2/pygame/DirectInput 只认扫描码，VK 注入游戏收不到 |
+| SetProcessDPIAware | GetWindowRect 与 ImageGrab 坐标一致（HiDPI 不错位） |
+| 全屏坐标用虚拟屏原点换算 | 多显示器副屏在主屏左/上时原点为负，不换算则全屏坐标整体偏移 |
+| 窗口 hwnd 记忆 + class_name 复核 | min/restore 不重复匹配标题；hwnd 被 OS 复用时自动失效防误关 |
 | FunctionTool 子类化 + call() 重写 | AstrBot v4.16+ 执行器原生支持，不依赖 star_manager 的 partial 回绑时机 |
 | 显式设置 handler_module_path | 保证插件卸载/重载时工具被正确清理 |
 | VL 降级链优先复用 irmia_vision | 两插件并存时零重复配置；软依赖，缺失自动回退内置解析 |
@@ -76,3 +79,7 @@ click(target="保存")
 |------|------|------|
 | v1.0.0 | 2026-06-12 | UIA 控件树方案（已废弃：COM 线程模型在 AstrBot 下不可用） |
 | v2.0.0 | 2026-08 | 全面转向视觉方案：三级定位 + 记忆库 + hover-verify + diff 验证 |
+| v2.1.0 | 2026-08 | 中文输入修复（SendInput/剪贴板双通道）；look 引导 LLM 用 target 而非自行换算坐标 |
+| v2.1.1 | 2026-08 | 窗口管理修复（最小化窗口误过滤、hwnd 记忆、restore 状态机、screen_changed 补齐、坐标空间标注） |
+| v2.2.0 | 2026-08 | scan_scene 场景结构识别；press_key 扫描码通道；desktop-play SKILL.md；VL max_tokens 配额修复 |
+| v2.2.1 | 2026-08 | 多视角评审修复 35 项：scroll 方向反转、剪贴板 finally、OCR 跨池匹配、虚拟屏原点、坐标钳制等 |

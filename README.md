@@ -79,7 +79,7 @@ pip install rapidocr-onnxruntime        # 本地模型 OCR（跨平台）
 ## 注意事项
 
 - 仅支持 Windows；需要桌面会话（远程桌面最小化时截图会黑屏）。
-- 中文输入默认走剪贴板粘贴通道（实测最可靠），纯 ASCII 走 SendInput 逐键注入；配置项 `input_method` 可强制切换（auto/unicode/clipboard）。粘贴会短暂占用剪贴板，用后自动恢复原内容。
+- 中文输入默认走剪贴板粘贴通道（实测最可靠），纯 ASCII 走 SendInput 逐键注入；配置项 `input_method` 可强制切换（auto/unicode/clipboard）。粘贴会短暂占用剪贴板，用后自动恢复**文本**内容（图片/文件等非文本内容无法恢复，请注意）。
 - 键盘注入只对「系统前台焦点」生效：`type_text` 建议传 `target` 让插件先真实点击聚焦。
 - 操作坐标一律为屏幕原生像素（插件内部已处理 DPI），LLM 无需也不应自行换算坐标。
 - 这是桌面级操作能力，请注意授权范围——任何能给 bot 发消息的人理论上都能驱动你的电脑。
