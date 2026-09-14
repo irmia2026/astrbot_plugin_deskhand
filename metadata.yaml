@@ -1,4 +1,5 @@
 name: astrbot_plugin_deskhand
+display_name: 弥亚之手
 desc: 视觉方案 Windows 桌面操控 — 截图 + 本地 OCR + VL 模型三级定位，让 LLM Agent 操作任意桌面软件
 help: |
   DeskHand v2（视觉方案）。安装后 LLM 可使用以下 9 个 Tool 操控 Windows 桌面：
