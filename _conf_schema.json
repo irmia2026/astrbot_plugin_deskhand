@@ -1,27 +1,97 @@
 {
-  "scan_timeout": {
-    "type": "int",
-    "default": 5,
-    "description": "控件树扫描超时（秒）"
+  "VL 模型配置": {
+    "description": "视觉语言模型配置。同时安装 irmia_vision 插件时会优先复用其降级链，此处可留空。",
+    "type": "object",
+    "items": {
+      "vl_provider_1": {
+        "description": "首选 VL 模型（AstrBot 已保存模型的 ID）",
+        "type": "string",
+        "default": ""
+      },
+      "vl_provider_2": {
+        "description": "次选 VL 模型（首选不可用时降级）",
+        "type": "string",
+        "default": ""
+      },
+      "vl_provider_3": {
+        "description": "再次选 VL 模型",
+        "type": "string",
+        "default": ""
+      },
+      "vl_provider_ids": {
+        "description": "高级：手动填写模型 ID（逗号分隔，按降级顺序），填写后覆盖上方三个下拉框",
+        "type": "string",
+        "default": ""
+      },
+      "vl_model": {
+        "description": "手动 VL 模型连接参数（以上均为空时生效）",
+        "type": "object",
+        "items": {
+          "base_url": {
+            "description": "OpenAI 兼容 API 地址",
+            "type": "string",
+            "default": "https://api.deepseek.com"
+          },
+          "api_key": {
+            "description": "API 密钥",
+            "type": "string",
+            "default": ""
+          },
+          "model": {
+            "description": "模型名称",
+            "type": "string",
+            "default": "deepseek-v4-flash-vision-exp"
+          },
+          "timeout": {
+            "description": "请求超时（秒）",
+            "type": "float",
+            "default": 120.0
+          }
+        }
+      }
+    }
   },
-  "max_depth": {
-    "type": "int",
-    "default": 15,
-    "description": "控件树最大递归深度"
-  },
-  "max_children": {
-    "type": "int",
-    "default": 120,
-    "description": "单个控件最大子节点数"
-  },
-  "cache_size": {
-    "type": "int",
-    "default": 128,
-    "description": "控件 ID 缓存上限（LRU）"
-  },
-  "screenshot_annotate": {
-    "type": "bool",
-    "default": false,
-    "description": "截图时是否默认标注控件边框"
+  "定位与行为": {
+    "description": "定位引擎与动作行为开关",
+    "type": "object",
+    "items": {
+      "ocr_enabled": {
+        "description": "启用本地 OCR 定位通道（需安装 winsdk 或 rapidocr-onnxruntime）",
+        "type": "bool",
+        "default": true
+      },
+      "memory_enabled": {
+        "description": "启用元素记忆库（成功定位的元素下次直接用历史坐标）",
+        "type": "bool",
+        "default": true
+      },
+      "hover_verify": {
+        "description": "点击前用 VL 确认落点（更准，每次点击多一次 VL 调用）",
+        "type": "bool",
+        "default": true
+      },
+      "max_zoom": {
+        "description": "VL 漏斗最大下钻级数",
+        "type": "int",
+        "default": 2
+      },
+      "post_action_wait": {
+        "description": "动作后等待画面稳定的时间（秒）",
+        "type": "float",
+        "default": 0.4
+      },
+      "input_method": {
+        "description": "文本输入方式：auto=非ASCII自动走剪贴板（推荐）；unicode=SendInput逐键注入；clipboard=强制剪贴板粘贴",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "unicode", "clipboard"],
+        "labels": ["自动（推荐）", "SendInput 逐键注入", "剪贴板粘贴"]
+      },
+      "min_change_percent": {
+        "description": "画面变化判定阈值（变化像素占比%，低于则视为无变化。光标闪烁约 0.007%）",
+        "type": "float",
+        "default": 0.05
+      }
+    }
   }
 }

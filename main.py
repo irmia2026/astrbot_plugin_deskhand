@@ -1,202 +1,101 @@
 """
-main.py — AstrBot Star 插件入口。
+main.py — DeskHand v2：视觉方案桌面操控插件（AstrBot Star 入口）。
 
-注册 9 个 LLM Tool，供 LLM Agent 调用。
-所有 Tool 内部调用同步阻塞的 UIA/win32 API，使用 asyncio.to_thread 避免阻塞事件循环。
+与 v1 的区别：全面转向视觉方案，不再使用 UIA 控件树。
+- 定位：元素记忆 → 本地 OCR → VL 网格漏斗（三级降级）；
+- 执行：win32 键鼠（UNICODE 文本注入，支持中文）；
+- 验证：ImageChops 图像 diff（确定性信号，C 速度）；
+- VL 降级链：优先复用同时安装的 irmia_vision 插件，否则用本插件配置/AstrBot 已保存模型。
 """
 
-import asyncio
-import json
-import logging
+from __future__ import annotations
 
-from astrbot.api import logger, FunctionTool
-from astrbot.api.star import Context, Star
+import os
 
-from .tools.desk_state import desk_state
-from .tools.desk_click import desk_click
-from .tools.desk_type import desk_type
-from .tools.desk_press import desk_press
-from .tools.desk_drag import desk_drag
-from .tools.desk_scroll import desk_scroll
-from .tools.desk_select import desk_select
-from .tools.desk_window import desk_window
-from .tools.desk_screenshot import desk_screenshot
+from astrbot.api import logger, star
 
+from . import tools as _tools
+from .engine import locate as _locate
+from .engine import memory as _memory_mod
+from .engine import vl as _vl
 
-def _ok(data) -> str:
-    return json.dumps(data, ensure_ascii=False, default=str)
+_DEFAULT_CONFIG = {
+    "ocr_enabled": True,
+    "memory_enabled": True,
+    "hover_verify": True,
+    "max_zoom": 2,
+    "post_action_wait": 0.4,
+}
 
 
-# ── 9 个模块级 handler（普通函数，AstrBot 会通过 functools.partial 注入 star_cls） ──
+class DeskHandPlugin(star.Star):
+    """DeskHand v2 — 视觉方案桌面操控"""
 
-async def _desk_state_handler(self, event, target: str = None, mode: str = None, **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_state, target=target, mode=mode))
-
-async def _desk_click_handler(self, event, id: int, button: str = "left", double: bool = False, hover: bool = False, verify: str = "full", **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_click, id, button, double, hover, verify=verify))
-
-async def _desk_type_handler(self, event, id: int, text: str, line: int = None, verify: str = "full", **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_type, id, text, line, verify=verify))
-
-async def _desk_press_handler(self, event, keys: list, action: str = "press", verify: str = "full", **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_press, keys, action, verify=verify))
-
-async def _desk_drag_handler(self, event, from_id: int, to_id: int = None, to_x: int = None, to_y: int = None, verify: str = "full", **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_drag, from_id, to_id, to_x, to_y, verify=verify))
-
-async def _desk_scroll_handler(self, event, id: int, direction: str, amount: int = 3, verify: str = "full", **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_scroll, id, direction, amount, verify=verify))
-
-async def _desk_select_handler(self, event, id: int, start: int, end: int, verify: str = "full", **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_select, id, start, end, verify=verify))
-
-async def _desk_window_handler(self, event, action: str, hwnd: int = None, x: int = None, y: int = None, w: int = None, h: int = None, verify: str = "full", **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_window, action, hwnd, x, y, w, h, verify=verify))
-
-async def _desk_screenshot_handler(self, event, annotate: bool = False, **kwargs) -> str:
-    return _ok(await asyncio.to_thread(desk_screenshot, annotate))
-
-
-class DeskHandPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: star.Context, config: dict = None) -> None:
         super().__init__(context)
+        self.context = context
 
-        tools = [
-            FunctionTool(
-                name="desk_state",
-                description="扫描窗口控件树。target=窗口名过滤；mode=interactive只返交互控件/coords只返坐标。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "target": {"type": "string", "description": "窗口名模糊匹配，不传则扫全桌面"},
-                        "mode": {"type": "string", "enum": ["interactive", "coords"], "description": "interactive过滤结构节点，coords仅窗口rect"}
-                    },
-                    "required": []
-                },
-                handler=_desk_state_handler,
-            ),
-            FunctionTool(
-                name="desk_click",
-                description="点击/悬停控件。verify=light跳过像素diff。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "integer"},
-                        "button": {"type": "string", "enum": ["left", "right", "middle"]},
-                        "double": {"type": "boolean"},
-                        "hover": {"type": "boolean"},
-                        "verify": {"type": "string", "enum": ["full", "light", "none"], "description": "full截屏对比/light仅前景/none跳过"},
-                    },
-                    "required": ["id"],
-                },
-                handler=_desk_click_handler,
-            ),
-            FunctionTool(
-                name="desk_type",
-                description="向控件输入文本。verify=light跳过像素diff。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "integer"},
-                        "text": {"type": "string"},
-                        "line": {"type": "integer"},
-                        "verify": {"type": "string", "enum": ["full", "light", "none"], "description": "full截屏对比/light仅前景/none跳过"},
-                    },
-                    "required": ["id", "text"],
-                },
-                handler=_desk_type_handler,
-            ),
-            FunctionTool(
-                name="desk_press",
-                description="发送按键组合。verify=light跳过像素diff。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "keys": {"type": "array", "items": {"type": "string"}},
-                        "action": {"type": "string", "enum": ["press", "hold", "release"]},
-                        "verify": {"type": "string", "enum": ["full", "light", "none"], "description": "full截屏对比/light仅前景/none跳过"},
-                    },
-                    "required": ["keys"],
-                },
-                handler=_desk_press_handler,
-            ),
-            FunctionTool(
-                name="desk_drag",
-                description="拖拽：from_id到to_id或(to_x,to_y)。verify=light跳过像素diff。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "from_id": {"type": "integer"},
-                        "to_id": {"type": "integer"},
-                        "to_x": {"type": "integer"},
-                        "to_y": {"type": "integer"},
-                        "verify": {"type": "string", "enum": ["full", "light", "none"]},
-                    },
-                    "required": ["from_id"],
-                },
-                handler=_desk_drag_handler,
-            ),
-            FunctionTool(
-                name="desk_scroll",
-                description="对控件滚动。verify=light跳过像素diff。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "integer"},
-                        "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
-                        "amount": {"type": "integer"},
-                        "verify": {"type": "string", "enum": ["full", "light", "none"]},
-                    },
-                    "required": ["id", "direction"],
-                },
-                handler=_desk_scroll_handler,
-            ),
-            FunctionTool(
-                name="desk_select",
-                description="选中控件内start到end字符。verify=light跳过像素diff。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "integer"},
-                        "start": {"type": "integer"},
-                        "end": {"type": "integer"},
-                        "verify": {"type": "string", "enum": ["full", "light", "none"]},
-                    },
-                    "required": ["id", "start", "end"],
-                },
-                handler=_desk_select_handler,
-            ),
-            FunctionTool(
-                name="desk_window",
-                description="窗口管理：min/max/restore/close/focus/set_topmost/move/resize。verify=light跳过像素diff。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["min", "max", "restore", "close", "focus", "set_topmost", "move", "resize"]},
-                        "hwnd": {"type": "integer"},
-                        "x": {"type": "integer"},
-                        "y": {"type": "integer"},
-                        "w": {"type": "integer"},
-                        "h": {"type": "integer"},
-                        "verify": {"type": "string", "enum": ["full", "light", "none"]},
-                    },
-                    "required": ["action"],
-                },
-                handler=_desk_window_handler,
-            ),
-            FunctionTool(
-                name="desk_screenshot",
-                description="截图保存PNG，返回路径。annotate=True标注控件框。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "annotate": {"type": "boolean"},
-                    },
-                    "required": [],
-                },
-                handler=_desk_screenshot_handler,
-            ),
-        ]
+        cfg = dict(_DEFAULT_CONFIG)
+        if isinstance(config, dict):
+            # AstrBot 分节配置：展开已知 section（vl_model 等嵌套 dict 保持原样）
+            for section in ("VL 模型配置", "定位与行为"):
+                sec = config.get(section)
+                if isinstance(sec, dict):
+                    cfg.update(sec)
+            # 兼容无分节的平铺配置
+            for k, v in config.items():
+                if k not in ("VL 模型配置", "定位与行为"):
+                    cfg[k] = v
 
+        # VL 层：配置 + AstrBot context（provider 发现）
+        _vl.setup(cfg, context)
+        _tools.setup(cfg)
+
+        # 元素记忆库（SQLite，放插件数据目录）
+        self._memory = None
+        if cfg.get("memory_enabled", True):
+            try:
+                try:
+                    from astrbot.api.star import StarTools
+                    data_dir = str(StarTools.get_data_dir())
+                except Exception:
+                    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+                db_path = os.path.join(data_dir, "deskhand_memory.db")
+                self._memory = _memory_mod.ElementMemory(db_path)
+                _locate.set_memory(self._memory)
+            except Exception as e:
+                logger.warning(f"deskhand: 记忆库初始化失败（降级为无记忆模式）: {e}")
+
+        tools = _tools.register_all()
         context.add_llm_tools(*tools)
-        logger.info(f"DeskHand 插件已加载 — 注册了 {len(tools)} 个 LLM Tool")
+        # 修正 handler_module_path，保证插件卸载/重载时工具能被正确清理
+        for t in tools:
+            t.handler_module_path = __name__
+
+        ocr_state = "可用" if self._ocr_available() else "不可用（安装 winsdk 或 rapidocr-onnxruntime 可开启）"
+        logger.info(
+            f"DeskHand v2 已加载 — {len(tools)} 个工具 | VL: {'可用' if _vl.vl_available() else '未配置'} | "
+            f"OCR: {ocr_state} | 记忆库: {'开启' if self._memory else '关闭'}"
+        )
+
+    @staticmethod
+    def _ocr_available() -> bool:
+        try:
+            from .engine import ocr
+            return ocr.available()
+        except Exception:
+            return False
+
+    async def terminate(self) -> None:
+        _locate.set_memory(None)  # 先解除全局引用，避免后续调用打到已关闭的连接
+        if self._memory is not None:
+            try:
+                self._memory.close()
+            except Exception:
+                pass
+            self._memory = None
+        try:
+            from .engine import desktop as _desktop
+            _desktop.shutdown()
+        except Exception:
+            pass

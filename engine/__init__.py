@@ -1,1 +1,1 @@
-# DeskHand engine — Windows GUI 控件操控引擎
+# DeskHand engine — 视觉方案桌面操控引擎（desktop/input/ocr/vl/locate/memory/verify）
