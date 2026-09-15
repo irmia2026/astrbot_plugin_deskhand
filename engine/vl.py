@@ -20,6 +20,7 @@ import importlib
 import io
 import logging
 import sys
+import time
 from typing import Optional
 
 import httpx
@@ -125,20 +126,28 @@ def _chain_from_self() -> list[dict]:
     return []
 
 
-_chain_cache: Optional[list[dict]] = None
+_chain_cache: Optional[tuple] = None  # (cached_at_monotonic, chain)
+_CHAIN_TTL = 300.0  # 秒：配置/外部插件变化最多 5 分钟内生效
+
+
+def reset_chain() -> None:
+    """清空降级链缓存（配置变更后调用）。"""
+    global _chain_cache
+    _chain_cache = None
 
 
 def get_chain() -> list[dict]:
     """获取 VL 降级链（优先复用 irmia_vision）。
 
-    只缓存非空链：插件加载可能早于 provider 初始化，空链不缓存以便后续重试。
+    只缓存非空链且带 TTL：插件加载可能早于 provider 初始化（空链不缓存），
+    配置重配后最多 5 分钟内自动刷新（无需重启插件）。
     """
     global _chain_cache
-    if _chain_cache:
-        return _chain_cache
+    if _chain_cache and (time.monotonic() - _chain_cache[0]) < _CHAIN_TTL:
+        return _chain_cache[1]
     chain = _chain_from_irmia_vision() or _chain_from_self()
     if chain:
-        _chain_cache = chain
+        _chain_cache = (time.monotonic(), chain)
         logger.info(
             "VL 降级链: %s",
             " -> ".join(f"{c.get('model','?')}@{c.get('base_url','')[:30]}" for c in chain),
@@ -170,12 +179,20 @@ def encode_for_vl(image, long_edge: int = VL_IMAGE_LONG_EDGE) -> tuple[str, floa
 
 
 async def ask(image, prompt: str, *, max_tokens: int = 4096,
-              json_mode: bool = False) -> str:
+              json_mode: bool = False, allow_reasoning: bool = False) -> str:
     """调用 VL 模型（按降级链依次尝试），返回文本。全部失败抛异常。
 
     推理型模型注意：思考链会消耗 max_tokens，给太小会导致 content 为空
     （调用方曾用 64/128，思维链直接吃光配额）——所以默认 4096。
-    content 为空时先原样重试一次，仍空才回退 reasoning_content 并加标记。
+
+    关键设计（修复「假通过」）：
+    - content 为空时先原样重试一次，仍空则**继续降级到下一个模型**，
+      而不是回退 reasoning_content——思维链里可能含有语法合法但答案错误的
+      JSON 片段（模型复述题目），结构化解析一旦接受就是「落点假通过」；
+    - 只有 allow_reasoning=True 的调用方（look 这类纯文本场景）才在
+      全链失败后用思维链兜底（返回 "[reasoning] " 前缀文本）。
+      结构化调用方（locate/verify_point/scan_scene）一律走默认 False：
+      拿不到干净 content 就抛异常，绝不把 CoT 当答案。
     """
     chain = get_chain()
     if not chain:
@@ -183,49 +200,79 @@ async def ask(image, prompt: str, *, max_tokens: int = 4096,
 
     image_url, _scale = encode_for_vl(image)
     last_err: Optional[Exception] = None
-    timeout = max(float(c.get("timeout", 120.0)) for c in chain)
+
+    def _timeout(c) -> float:
+        try:
+            return float(c.get("timeout") or 120.0)
+        except (TypeError, ValueError):
+            return 120.0
+
+    timeout = max(_timeout(c) for c in chain)
+
+    def _payload(cfg):
+        p = {
+            "model": cfg.get("model", ""),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url",
+                         # 尊重复用链上的 detail 配置（irmia_vision v1.0.6+）
+                         "image_url": {"url": image_url,
+                                       "detail": cfg.get("detail", "auto") or "auto"}},
+                    ],
+                }
+            ],
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            p["response_format"] = {"type": "json_object"}
+        return p
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         for cfg in chain:
             if not cfg.get("api_key"):
                 continue
-            payload = {
-                "model": cfg.get("model", ""),
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url",
-                             # 尊重复用链上的 detail 配置（irmia_vision v1.0.6+）
-                             "image_url": {"url": image_url,
-                                           "detail": cfg.get("detail", "auto") or "auto"}},
-                        ],
-                    }
-                ],
-                "max_tokens": max_tokens,
-            }
-            if json_mode:
-                payload["response_format"] = {"type": "json_object"}
             base_url = str(cfg.get("base_url", "")).rstrip("/")
             try:
                 for _attempt in range(2):  # 空内容原样重试一次
                     resp = await client.post(
                         f"{base_url}/chat/completions",
                         headers={"Authorization": f"Bearer {cfg['api_key']}"},
-                        json=payload,
+                        json=_payload(cfg),
                     )
                     resp.raise_for_status()
                     msg = resp.json()["choices"][0]["message"]
                     content = (msg.get("content") or "").strip()
                     if content:
                         return content
-                # 两次都空：回退思维链（DeepSeek 推理型），加标记便于甄别
-                reasoning = (msg.get("reasoning_content") or "").strip()
-                if reasoning:
-                    return "[reasoning] " + reasoning
-                last_err = ValueError(f"模型 {cfg.get('model','')} 返回空内容")
+                # 仍为空：不在这里回退思维链，按失败处理继续降级
+                last_err = ValueError(
+                    f"模型 {cfg.get('model','')} 连续返回空 content（思维链可能耗尽配额）"
+                )
             except Exception as e:
                 last_err = e
-                logger.warning("VL 模型 %s 失败，尝试降级: %s", cfg.get("model"), e)
+            logger.warning("VL 模型 %s 失败，尝试降级: %s", cfg.get("model"), last_err)
+
+    # 全链失败：allow_reasoning 的纯文本场景用第一个可用模型的思维链兜底
+    if allow_reasoning:
+        for cfg in chain:
+            if not cfg.get("api_key"):
+                continue
+            base_url = str(cfg.get("base_url", "")).rstrip("/")
+            try:
+                async with httpx.AsyncClient(timeout=_timeout(cfg)) as client:
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {cfg['api_key']}"},
+                        json=_payload(cfg),
+                    )
+                    resp.raise_for_status()
+                    msg = resp.json()["choices"][0]["message"]
+                    reasoning = (msg.get("reasoning_content") or "").strip()
+                    if reasoning:
+                        return "[reasoning] " + reasoning
+            except Exception:
+                continue
     raise RuntimeError(f"所有 VL 模型均失败: {last_err}")

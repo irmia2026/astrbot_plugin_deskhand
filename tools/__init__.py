@@ -95,13 +95,29 @@ async def _post_action_diff(before, bbox: Optional[tuple]) -> dict:
     after = await desktop.run(desktop.screenshot, bbox)
     try:
         d = verify.diff_images(before, after)
+        # 有意义变化 = 尺寸变化 或 变化面积占比 ≥ 阈值（光标闪烁 ~0.007% 不算数）
+        pct = d.get("percent")
+        min_pct = float(_cfg("min_change_percent", 0.05))
+        d["meaningful"] = bool(d["changed"]) and (pct is None or pct >= min_pct)
+        # 第二层：像素无变化但文字可能变了（纯文本刷新，实测 0.0% 像素变化却真实生效）
+        if not d["meaningful"] and bool(_cfg("ocr_enabled", True)) and ocr.available():
+            try:
+                wb = await desktop.run(_ocr_word_set, before)
+                wa = await desktop.run(_ocr_word_set, after)
+                d["text_changed"] = (wb != wa)
+            except Exception:
+                d["text_changed"] = False
+        else:
+            d["text_changed"] = False
     finally:
         after.close()
-    # 有意义变化 = 尺寸变化 或 变化面积占比 ≥ 阈值（光标闪烁 ~0.007% 不算数）
-    pct = d.get("percent")
-    min_pct = float(_cfg("min_change_percent", 0.05))
-    d["meaningful"] = bool(d["changed"]) and (pct is None or pct >= min_pct)
     return d
+
+
+def _ocr_word_set(img) -> frozenset:
+    """提取图像中的词集合（用于动作前后文字差异判定）。"""
+    items = ocr.recognize(img)
+    return frozenset(str(it["text"]) for it in items if not it.get("line"))
 
 
 def _update_memory(r: dict, target: str, success: bool) -> None:
@@ -150,11 +166,16 @@ async def look(window: str = "", question: str = "", grid: bool = False,
         bbox = tuple(win["rect"])
 
     shot = await desktop.run(desktop.screenshot, bbox)
+    w0, h0 = shot.size
+    coords = desktop.coord_space_info(shot.size)
+    # VL 看的是预缩放图：vl_image_scale = 模型侧像素/物理像素（与 DPI 缩放是两回事）
+    coords["vl_image_scale"] = round(min(1.0, vl.VL_IMAGE_LONG_EDGE / max(w0, h0)), 4)
+    coords["note"] = "本工具返回的所有坐标均为屏幕物理像素，可直接使用，无需换算"
     result: dict = {
         "ok": True,
         "window": (win or {}).get("title", "整个屏幕"),
         "size": list(shot.size),
-        "coords": desktop.coord_space_info(shot.size),
+        "coords": coords,
     }
 
     # OCR 文字清单（本地、免费、坐标精确）
@@ -191,7 +212,14 @@ async def look(window: str = "", question: str = "", grid: bool = False,
         if grid:
             vl_img, _cells = locate._draw_grid(shot)
         try:
-            result["vl_analysis"] = await vl.ask(vl_img, prompt, max_tokens=2048)
+            # look 是纯文本场景：允许思维链兜底（带 [reasoning] 标记）；
+            # VL 全链失败时优雅降级为 OCR-only，不让整个 look 报错
+            result["vl_analysis"] = await vl.ask(
+                vl_img, prompt, max_tokens=4096, allow_reasoning=True
+            )
+        except Exception as e:
+            result["vl_analysis"] = None
+            result["vl_error"] = str(e)
         finally:
             if grid and vl_img is not shot:
                 vl_img.close()
@@ -351,6 +379,7 @@ async def click(target: str = "", x: Optional[int] = None, y: Optional[int] = No
     bbox = _win_bbox(win)
 
     # hover-verify：记忆高置信命中可跳过（省一次 VL 调用）
+    # verify 自身异常（VL 全链失败等）不阻断点击——降级为未验证状态继续
     verified = None
     hover_verify_on = bool(_cfg("hover_verify", True))
     skip_verify = r["source"] == "memory" and r.get("hits", 0) >= 3
@@ -358,27 +387,31 @@ async def click(target: str = "", x: Optional[int] = None, y: Optional[int] = No
         verify_click and target and hover_verify_on
         and vl.vl_available() and not skip_verify
     ):
-        await desktop.run(inp.hover, px, py)
-        for _attempt in range(2):
-            vres = await locate.verify_point(px, py, target, bbox)
-            if vres["ok"]:
-                verified = True
-                break
-            dx, dy = vres.get("dx") or 0, vres.get("dy") or 0
-            if dx == 0 and dy == 0:
-                break
-            px += dx
-            py += dy
+        try:
             await desktop.run(inp.hover, px, py)
-        if verified is not True:
-            verified = False
+            for _attempt in range(2):
+                vres = await locate.verify_point(px, py, target, bbox)
+                if vres["ok"]:
+                    verified = True
+                    break
+                dx, dy = vres.get("dx") or 0, vres.get("dy") or 0
+                if dx == 0 and dy == 0:
+                    break
+                px += dx
+                py += dy
+                await desktop.run(inp.hover, px, py)
+            if verified is not True:
+                verified = False
+        except Exception as e:
+            logger.warning("hover-verify 异常，降级为未验证点击: %s", e)
+            verified = None
 
     before = await desktop.run(desktop.screenshot, bbox)
     await desktop.run(inp.click, px, py, button, double)
     diff = await _post_action_diff(before, bbox)
     before.close()
 
-    ok = diff["meaningful"] or verified is True
+    ok = diff["meaningful"] or diff.get("text_changed") or verified is True
     if target:
         _update_memory({**r, "x": px, "y": py}, target, ok)
 
@@ -404,6 +437,7 @@ async def click(target: str = "", x: Optional[int] = None, y: Optional[int] = No
         # 也会是 false——调用方据此决定是否复查，而不是盲信 ok
         "effective": ok,
         "screen_changed": diff["meaningful"],
+        "text_changed": diff.get("text_changed"),
         "change_percent": diff.get("percent"),
         "change_region": diff.get("bbox"),
         "hint": None if diff["meaningful"] else "画面无可见变化：可能未点中，或点击无视觉反馈。",

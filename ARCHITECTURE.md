@@ -1,6 +1,6 @@
 # 🏗️ DeskHand v2 架构设计（视觉方案）
 
-> 版本 v2.2.1 · 2026-08 · 全面转向视觉方案
+> 版本 v2.2.2 · 2026-08 · 全面转向视觉方案
 
 ---
 
@@ -83,3 +83,4 @@ click(target="保存")
 | v2.1.1 | 2026-08 | 窗口管理修复（最小化窗口误过滤、hwnd 记忆、restore 状态机、screen_changed 补齐、坐标空间标注） |
 | v2.2.0 | 2026-08 | scan_scene 场景结构识别；press_key 扫描码通道；desktop-play SKILL.md；VL max_tokens 配额修复 |
 | v2.2.1 | 2026-08 | 多视角评审修复 35 项：scroll 方向反转、剪贴板 finally、OCR 跨池匹配、虚拟屏原点、坐标钳制等 |
+| v2.2.2 | 2026-08 | 思维链隔离（结构化调用禁用 CoT 回退，防「假通过」）；空 content 继续降级链；链缓存 TTL；OCR 文字差异层；hover-verify 异常降级 |
