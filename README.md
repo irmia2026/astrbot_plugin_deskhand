@@ -21,13 +21,28 @@ click(target="保存按钮")
 
 点击前还有 **hover-verify**：在落点画标记局部截图，让 VL 确认「准星是否压在目标上」，不对则按 VL 建议修正一次再确认。动作后自动 **ImageChops diff** 验证画面是否变化。
 
+## 工作方式：元素卡片，零运算
+
+LLM 不需要算坐标、不需要记文字、不需要解读验证字段——一切机械劳动都在插件内部：
+
+```
+1. look()                  → 返回编号元素卡片（约 1 秒，本地 OCR 免费）
+     e1 [text] 保存 (920,490)
+     e2 [text] 搜索插件 (959,491)
+     e3 [input] 用户名 (640,320)
+2. click(element="e2")     → 插件自动完成 定位→确认→点击→验证
+3. 返回 verdict            → success / uncertain / failed + 一句中文结论
+```
+
+图形/游戏场景（OCR 读不出文字）改用 `scan_scene`——同样的编号卡片，元素来自视觉模型。
+
 ## 九个工具
 
 | 工具 | 功能 | 示例 |
 |------|------|------|
-| `look` | 看屏幕/窗口（VL 分析 + OCR 文字坐标清单） | `look(window="QQ")` |
-| `scan_scene` | 场景结构识别（图形/游戏场景：元素语义+类型+坐标+提示图标，合并 OCR） | `scan_scene(window="游戏")` |
-| `click` | 点击（target 三级定位 / x,y 直点） | `click(target="发送")` |
+| `look` | 看屏幕/窗口，返回编号元素卡片（默认只跑本地 OCR；传 question 才调 VL） | `look(window="QQ")` |
+| `scan_scene` | 场景结构识别（图形/游戏场景：VL 输出编号元素卡片） | `scan_scene(window="游戏")` |
+| `click` | 点击（**element=eN 编号引用** / target 三级定位 / x,y 直点） | `click(element="e2")` |
 | `type_text` | 输入文本（中文自动走剪贴板，无障碍） | `type_text(text="你好", target="输入框")` |
 | `press_key` | 组合键（**扫描码通道**，游戏/SDL2/DirectInput 兼容） | `press_key(keys=["ctrl","s"])` |
 | `scroll` | 滚动（垂直/水平） | `scroll(direction="down")` |

@@ -1,6 +1,6 @@
 # 🏗️ DeskHand v2 架构设计（视觉方案）
 
-> 版本 v2.2.2 · 2026-08 · 全面转向视觉方案
+> 版本 v2.3.0 · 2026-08 · 全面转向视觉方案
 
 ---
 
@@ -18,6 +18,7 @@ astrbot_plugin_deskhand/
 │   ├── ocr.py                 # 本地 OCR：WinRT（winsdk）→ RapidOCR → 无（可插拔）
 │   ├── vl.py                  # VL 客户端：复用 irmia_vision 降级链或内置解析
 │   ├── locate.py              # 三级定位引擎 + 网格标注 + hover-verify
+│   ├── scene.py               # 元素快照注册中心（e1..eN 编号 → 坐标，TTL 120s）
 │   ├── memory.py              # 元素记忆库（SQLite + aHash 图像签名）
 │   └── verify.py              # ImageChops 图像 diff + wait_for_change
 ├── tools/__init__.py          # 9 个工具 + FunctionTool 注册工厂
@@ -84,3 +85,4 @@ click(target="保存")
 | v2.2.0 | 2026-08 | scan_scene 场景结构识别；press_key 扫描码通道；desktop-play SKILL.md；VL max_tokens 配额修复 |
 | v2.2.1 | 2026-08 | 多视角评审修复 35 项：scroll 方向反转、剪贴板 finally、OCR 跨池匹配、虚拟屏原点、坐标钳制等 |
 | v2.2.2 | 2026-08 | 思维链隔离（结构化调用禁用 CoT 回退，防「假通过」）；空 content 继续降级链；链缓存 TTL；OCR 文字差异层；hover-verify 异常降级 |
+| v2.3.0 | 2026-08 | 元素卡片机制：look/scan_scene 注册编号快照（e1..eN），click(element=eN) 直接引用，Agent 零坐标运算；动作结果压缩为 verdict 三档中文结论；look 默认只跑免费 OCR（VL 改按需） |
