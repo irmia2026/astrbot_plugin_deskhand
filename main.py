@@ -21,6 +21,7 @@ from .engine import vl as _vl
 
 _DEFAULT_CONFIG = {
     "ocr_enabled": True,
+    "ocr_multiscale": "auto",
     "uia_enabled": True,
     "memory_enabled": True,
     "hover_verify": True,

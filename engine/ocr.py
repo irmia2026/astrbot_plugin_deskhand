@@ -170,6 +170,187 @@ def _ocr_rapid(image) -> list[dict]:
     return items
 
 
+# ── 多尺度参数 ────────────────────────────────────────────────
+#
+# 背景（真实反馈）：旧多尺度在真实全屏上从未生效过——
+# 1) 触发条件是「词数<8 或 中位字高<12」，而真机 150% DPI 下界面文字高 16-20px，两条都不成立；
+# 2) 就算触发，整图放大受 WinRT 边长上限（2600）限制：2560 宽全屏只能放大 1.0156×，
+#    而代码里 `if scale <= 1.1: return items` 直接早退。
+# 所以真正可行的做法是**分块放大**：每块放大后仍在上限内，再把结果合并回原图坐标。
+_MAX_ENGINE_DIM = 2600   # WinRT OCR 最大边长（engine.max_image_dimension 的保守值）
+_ENGINE_SAFE = 0.98      # 留安全边：正好卡在上限会让引擎内部再缩一次（双重重采样，实测 CER 反而变差）
+_TILE_PX = 1200          # 分块边长（放大 2× = 2400 < 2600×0.98）
+_TILE_OVERLAP = 96       # 块间重叠像素，避免文字被切在块边界
+_TILE_SCALE = 2.0        # 分块放大倍数
+_WHOLE_TRIGGER_WORDS = 8      # 触发下限：词数不足（稀疏画面）
+_WHOLE_TRIGGER_H = 12         # 触发下限：中位字高过小
+_TILE_TRIGGER_H = 16          # 分块放大触发：中位字高低于此值
+#
+# 阈值 16 的依据（两组真值实测，均在 150% DPI 本机）：
+#   A) 合成真值（PIL 渲染已知文本，smoke_ocr_truth.py）：
+#      10px 57%→21%、12px 57%→16%、14px 15%→10%、16px 14%→11%、20px 12%→12%
+#   B) 真实渲染（记事本加载已知文件 + 缩放，probe_ocr_realzoom.py）：
+#      12-13px 标题行 CER 33.3% → 16.7%（对半砍）；20px 19.0% → 19.0%（无收益）
+#   C) 真实全屏（2560×1600，中位字高 17px）：分块与单遍基本平手，
+#      但多花 1.35s（0.75s → 2.10s）
+# 结论：多尺度只对**真正的小字号**划算（≥17px 的常规界面文字加放大没用——
+# 那类错字是引擎对形近字的混淆，不是分辨率不够）。所以触发线取 16：
+# 小字号屏幕/缩小的日志/长文本仍能吃到大幅提升，常规屏幕不白花时间。
+# 需要“总是跑”可用 ocr_multiscale=force；关闭用 off。
+
+
+def _median_h(words: list[dict]) -> float:
+    hs = sorted(it["bottom"] - it["top"] for it in words)
+    return hs[len(hs) // 2] if hs else 99.0
+
+
+def _join_texts(texts: list[str]) -> str:
+    """拼接词为行文本：中文直接相连，ASCII 词之间补空格（否则 HelloWorld）。"""
+    out = ""
+    for t in texts:
+        if (out and out[-1].isascii() and out[-1].isalnum()
+                and t[:1].isascii() and t[:1].isalnum()):
+            out += " "
+        out += t
+    return out
+
+
+def _rect_iou(a: dict, b: dict) -> float:
+    ix = max(0, min(a["right"], b["right"]) - max(a["left"], b["left"]))
+    iy = max(0, min(a["bottom"], b["bottom"]) - max(a["top"], b["top"]))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    area_a = max(1, (a["right"] - a["left"]) * (a["bottom"] - a["top"]))
+    area_b = max(1, (b["right"] - b["left"]) * (b["bottom"] - b["top"]))
+    return inter / float(area_a + area_b - inter)
+
+
+def _edge_dist(wd: dict) -> int:
+    """词中心到所在块边界的距离（越大说明越靠近块中心，畸变越小、越可信）。"""
+    box = wd.get("_box")
+    if not box:
+        return 1 << 20
+    return min(wd["cx"] - box[0], box[2] - wd["cx"],
+               wd["cy"] - box[1], box[3] - wd["cy"])
+
+
+def _merge_tiled_words(words: list[dict]) -> list[dict]:
+    """合并各块的词：重叠区的同一个词只留一个（离块中心更近的那份更可信）。"""
+    kept: list[dict] = []
+    for wd in sorted(words, key=_edge_dist, reverse=True):
+        dup = False
+        for k in kept:
+            if (_rect_iou(wd, k) >= 0.4
+                    or (abs(wd["cx"] - k["cx"]) <= 6 and abs(wd["cy"] - k["cy"]) <= 6)):
+                dup = True
+                break
+        if not dup:
+            kept.append(wd)
+    for wd in kept:
+        wd.pop("_box", None)
+    return kept
+
+
+def _rebuild_lines(words: list[dict]) -> list[dict]:
+    """用词重建行级条目（分块会切断跨块的行，引擎原始行信息不可再用）。
+
+    行级条目对中文整句匹配很重要（「弥亚之手」应该是一个整体，不是四个字）。
+    同一行按垂直中心聚类；水平间隙过大的拆成多行（否则会把左右栏粘成一句）。
+    """
+    if not words:
+        return []
+    mh = max(6.0, _median_h(words))
+    rows: list[dict] = []
+    for wd in sorted(words, key=lambda x: (x["cy"], x["left"])):
+        for row in rows:
+            if abs(row["cy"] - wd["cy"]) < max(4.0, 0.6 * mh):
+                row["items"].append(wd)
+                row["cy"] = sum(i["cy"] for i in row["items"]) / len(row["items"])
+                break
+        else:
+            rows.append({"cy": float(wd["cy"]), "items": [wd]})
+
+    def _line_of(seg: list[dict]) -> dict:
+        left = min(i["left"] for i in seg)
+        top = min(i["top"] for i in seg)
+        right = max(i["right"] for i in seg)
+        bottom = max(i["bottom"] for i in seg)
+        return {
+            "text": _join_texts([i["text"] for i in seg]),
+            "cx": (left + right) // 2, "cy": (top + bottom) // 2,
+            "left": left, "top": top, "right": right, "bottom": bottom,
+            "line": True,
+        }
+
+    lines: list[dict] = []
+    for row in rows:
+        its = sorted(row["items"], key=lambda x: x["left"])
+        seg = [its[0]]
+        for prev, cur in zip(its, its[1:]):
+            if cur["left"] - prev["right"] > max(12.0, 1.5 * mh):
+                lines.append(_line_of(seg))
+                seg = [cur]
+            else:
+                seg.append(cur)
+        lines.append(_line_of(seg))
+    return lines
+
+
+def _recognize_tiled(image, scale: float = _TILE_SCALE, tile: int = _TILE_PX,
+                     overlap: int = _TILE_OVERLAP) -> list[dict]:
+    """分块放大识别：每块单独放大后识别，再合并回原图坐标。
+
+    分块的意义：整图放大撞 WinRT 边长上限（2560 宽只能放大 1.0156×），
+    而每块（默认 1200px）放大 2× 后 2400px 仍在安全范围内。
+    块大小会先按引擎上限夹一次：放大后超限时引擎会内部再缩一次，
+    双重重采样反而把结果弄糟（基准实测整图放大 1.86× 时 10px 字 CER 95%）。
+    """
+    w, h = image.size
+    engine = _detect_engine()
+    if engine == "winrt":
+        tile = min(tile, int(_MAX_ENGINE_DIM * _ENGINE_SAFE / max(1.0, scale)))
+    tile = max(256, tile)
+    step = max(64, tile - overlap)
+    words: list[dict] = []
+    for ty in range(0, h, step):
+        for tx in range(0, w, step):
+            box = (tx, ty, min(w, tx + tile), min(h, ty + tile))
+            if box[2] - box[0] < 16 or box[3] - box[1] < 16:
+                continue
+            crop = image.crop(box)
+            try:
+                big = crop.resize(
+                    (int(crop.size[0] * scale), int(crop.size[1] * scale)),
+                    Image.Resampling.LANCZOS,
+                )
+            finally:
+                crop.close()
+            try:
+                items = _recognize_once(big)
+            finally:
+                big.close()
+            for it in items:
+                if it.get("line"):
+                    continue  # 行级条目改为合并后重建（跨块行会被切断）
+                words.append({
+                    "text": it["text"],
+                    "left": box[0] + int(it["left"] / scale),
+                    "top": box[1] + int(it["top"] / scale),
+                    "right": box[0] + int(it["right"] / scale),
+                    "bottom": box[1] + int(it["bottom"] / scale),
+                    "cx": box[0] + int(it["cx"] / scale),
+                    "cy": box[1] + int(it["cy"] / scale),
+                    "_box": box,
+                })
+            if tx + tile >= w:
+                break
+        if ty + tile >= h:
+            break
+    merged = _merge_tiled_words(words)
+    return merged + _rebuild_lines(merged)
+
+
 # ── 统一入口 ────────────────────────────────────────────────────
 
 def _recognize_once(image) -> list[dict]:
@@ -181,51 +362,61 @@ def _recognize_once(image) -> list[dict]:
     return []
 
 
-def recognize(image, min_words: int = 8, min_char_height: int = 12) -> list[dict]:
+def recognize(image, min_words: int = _WHOLE_TRIGGER_WORDS,
+              min_char_height: int = _WHOLE_TRIGGER_H,
+              mode: str = "auto", stats: Optional[dict] = None) -> list[dict]:
     """识别 PIL 图像中的文字，返回 [{text, cx, cy, left, top, right, bottom}, ...]。
 
-    多尺度重试（坐标永远保持原图空间，调用方零换算）。双触发条件：
-    - 整图词数 < min_words（稀疏画面）；
-    - 词的中位字高 < min_char_height（小字号——真实屏幕词数再多也会触发）。
-    满足任一就放大重跑，取词数更多（或持平但更清晰）的一遍，坐标折回原图。
+    多尺度策略（坐标永远保持原图空间，调用方零换算）：
+    - 第一遍：原图直接识别；
+    - auto（默认）：先试**整图放大**（词数不足或字高 <12px 时）；整图放大受引擎边长
+      上限限制而不可行（scale ≤ 1.1）且中位字高 < _TILE_TRIGGER_H 时，改跑**分块放大**；
+    - force：直接跑分块放大；off：只跑一遍。
+    选用哪一遍：词数更多者胜（持平则取放大版——细节更清）。
+    stats（可选，传入则写入诊断）：{"pass": ..., "scale": ..., "tiled": bool,
+      "words_before": ..., "words_after": ..., "median_h_before": ..., "median_h_after": ...}
     """
     items = _recognize_once(image)
     words = [it for it in items if not it.get("line")]
-
-    def _median_h(ws: list[dict]) -> float:
-        hs = sorted(it["bottom"] - it["top"] for it in ws)
-        return hs[len(hs) // 2] if hs else 99
-
-    if len(words) >= min_words and _median_h(words) >= min_char_height:
+    h_before = _median_h(words)
+    if stats is not None:
+        stats.update({"pass": "single", "tiled": False, "words_before": len(words),
+                      "median_h_before": round(h_before, 1)})
+    if mode == "off":
         return items
 
     w, h = image.size
-    scale = 2.0
-    # WinRT 有最大边长限制，放大不得超过；RapidOCR 无此限制
-    if _detect_engine() == "winrt":
-        scale = min(scale, 2600 / max(w, h))
-    if scale <= 1.1:
-        return items
 
+    # ── 第二遍：分块放大 ──
+    # 为什么不再用「整图放大」：真值基准实测（smoke_ocr_truth.py），整图放大在小字号上
+    # 反而更差——10px 时 CER 56.8% → 95.1%，因为放大倍数顶到引擎边长上限，
+    # 引擎内部又把它缩回去，等于双重重采样；而分块放大在同一组用例上全面胜出
+    # （10px→21.0%、12px→16.0%、14px→9.9%、16px→11.1%）。
+    # 图片很小时分块退化为单块，效果等同整图放大，所以统一走分块即可。
+    needs_tiled = mode == "force" or (h_before < _TILE_TRIGGER_H) or len(words) < min_words
+    if not needs_tiled or (w * h) < 200 * 200:
+        return items
     try:
-        big = image.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-        items2 = _recognize_once(big)
-        big.close()
-    except Exception:
+        items3 = _recognize_tiled(image)
+    except Exception as e:
+        # 带堆栈：分块失败会静默退回单遍，若吞掉细节就再也查不出原因
+        # （真实教训：一次改名把 step 弄丢，NameError 被吞、多尺度静默失效）
+        logger.warning("OCR 分块放大失败（回退单遍结果）: %s", e, exc_info=True)
         return items
-
-    words2 = [it for it in items2 if not it.get("line")]
-    # 词数更多、或持平但字高更优（更清晰）时采用放大结果
-    if len(words2) > len(words) or (
-        len(words2) == len(words) and _median_h(words2) > _median_h(words)
-    ):
-        inv = 1.0 / scale
-        for it in items2:
-            for k in ("cx", "cy", "left", "top", "right", "bottom"):
-                it[k] = int(it[k] * inv)
-        logger.info("OCR 多尺度命中: %d→%d 词, 中位字高 %.0f→%.0f (scale=%.2f)",
-                    len(words), len(words2), _median_h(words), _median_h(words2), scale)
-        return items2
+    words3 = [it for it in items3 if not it.get("line")]
+    if stats is not None:
+        stats.update({"tiled": True, "scale": _TILE_SCALE,
+                      "tile_px": _TILE_PX, "overlap": _TILE_OVERLAP,
+                      "words_after": len(words3),
+                      "median_h_after": round(_median_h(words3), 1)})
+    # 词数更多者胜；持平取分块版（源分辨率更高）。词数明显变少则保留原结果（防退化）
+    if len(words3) >= len(words):
+        logger.info("OCR 分块放大命中: %d→%d 词 (scale=%.1f, tile=%d)",
+                    len(words), len(words3), _TILE_SCALE, _TILE_PX)
+        if stats is not None:
+            stats["pass"] = "tiled"
+        return items3
+    logger.info("OCR 分块放大词数更少（%d < %d），保留单遍结果", len(words3), len(words))
     return items
 
 

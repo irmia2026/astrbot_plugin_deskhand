@@ -393,22 +393,52 @@ def list_elements(hwnd: int, win_rect=None, limit: int = 18) -> list[dict]:
             _MAX_COUNT, collected["chrome_skipped"],
         )
     elements = []
+    try:
+        from . import desktop
+
+        sb = desktop.screen_bounds()
+    except Exception:
+        sb = None
     for c in collected["controls"]:
         l, t, r, b = c["rect"]
         if win_rect:
             # 与窗口矩形无交集的控件（屏外/隐藏面板）不上卡片
             if r <= win_rect[0] or l >= win_rect[2] or b <= win_rect[1] or t >= win_rect[3]:
                 continue
-        elements.append({
+        # 真实环境实测：Chromium 根容器会报超出屏幕的矩形（右边界 2911 > 屏宽 2560），
+        # 拿去画框/做去重判据都会错，必须先钳制到「窗口 ∩ 屏幕」范围
+        cl, ct, cr, cb = l, t, r, b
+        if win_rect:
+            cl, ct = max(l, win_rect[0]), max(t, win_rect[1])
+            cr, cb = min(r, win_rect[2]), min(b, win_rect[3])
+        if sb:
+            cl, ct = max(cl, sb[0]), max(ct, sb[1])
+            cr, cb = min(cr, sb[2]), min(cb, sb[3])
+        if cr - cl <= 2 or cb - ct <= 2:
+            continue  # 钳制后没有有效区域（本来就在屏外）
+        el = {
             "name": c["name"][:60] or c["type"],
             "type": c["type"],
-            "x": (l + r) // 2, "y": (t + b) // 2,
-            "left": l, "top": t, "right": r, "bottom": b,
+            "x": (cl + cr) // 2, "y": (ct + cb) // 2,
+            "left": cl, "top": ct, "right": cr, "bottom": cb,
             "has_icon": False, "source": "uia",
             "uia_patterns": sorted(c["pats"].keys()),
-        })
-    # 稳定排序：从上到下、从左到右（与视觉阅读顺序一致）
-    elements.sort(key=lambda e: (e["top"], e["left"]))
+            "_area": (cr - cl) * (cb - ct),
+        }
+        if (cl, ct, cr, cb) != (l, t, r, b):
+            el["rect_clamped"] = True  # 如实告知：原始矩形超出窗口/屏幕，已钳制
+        elements.append(el)
+
+    # 排序：容器级元素（占窗口大部分面积）靠后——否则它靠“左上角靠前”抢到 e1 这种
+    # 头号位置，截断时还会把真正的控件挤掉；其余按视觉阅读顺序（上→下、左→右）
+    win_area = (
+        float((win_rect[2] - win_rect[0]) * (win_rect[3] - win_rect[1])) if win_rect else 0.0
+    )
+    for el in elements:
+        el["uia_container"] = bool(win_area and el["_area"] >= 0.6 * win_area)
+    elements.sort(key=lambda e: (e["uia_container"], e["top"], e["left"]))
+    for el in elements:
+        el.pop("_area", None)
     if not elements and not minimized and cost > _SLOW_EMPTY_SEC:
         # 慢空树：缓存下来避免后续 look 白等（最小化窗口不入缓存，见函数内注释）
         _empty_cache[ckey] = time.monotonic()

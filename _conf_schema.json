@@ -60,6 +60,13 @@
         "type": "bool",
         "default": true
       },
+      "ocr_multiscale": {
+        "description": "OCR 多尺度放大：auto=小字号自动分块放大（推荐）；force=总是分块放大；off=只跑一遍",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "force", "off"],
+        "labels": ["自动（推荐）", "总是分块放大", "关闭"]
+      },
       "uia_enabled": {
         "description": "启用 UIA 控件通道（窗口模式优先生效：UIA 元素可后台点击/写入，不抢焦点不动鼠标）",
         "type": "bool",
