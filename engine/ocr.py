@@ -170,14 +170,51 @@ def _ocr_rapid(image) -> list[dict]:
 
 # ── 统一入口 ────────────────────────────────────────────────────
 
-def recognize(image) -> list[dict]:
-    """识别 PIL 图像中的文字，返回 [{text, cx, cy, left, top, right, bottom}, ...]。"""
+def _recognize_once(image) -> list[dict]:
     engine = _detect_engine()
     if engine == "winrt":
         return _ocr_winrt(image)
     if engine == "rapidocr":
         return _ocr_rapid(image)
     return []
+
+
+def recognize(image, min_words: int = 8) -> list[dict]:
+    """识别 PIL 图像中的文字，返回 [{text, cx, cy, left, top, right, bottom}, ...]。
+
+    多尺度重试（坐标永远保持原图空间，调用方零换算）：
+    首遍词数不足 min_words 时，自动放大图像再识别一遍（小字号救星），
+    取词数更多的一遍，坐标按放大比例折回原图。
+    """
+    items = _recognize_once(image)
+    base_words = sum(1 for it in items if not it.get("line"))
+    if base_words >= min_words:
+        return items
+
+    w, h = image.size
+    scale = 2.0
+    # WinRT 有最大边长限制，放大不得超过；RapidOCR 无此限制
+    if _detect_engine() == "winrt":
+        scale = min(scale, 2600 / max(w, h))
+    if scale <= 1.1:
+        return items
+
+    try:
+        big = image.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+        items2 = _recognize_once(big)
+        big.close()
+    except Exception:
+        return items
+
+    if sum(1 for it in items2 if not it.get("line")) > base_words:
+        inv = 1.0 / scale
+        for it in items2:
+            for k in ("cx", "cy", "left", "top", "right", "bottom"):
+                it[k] = int(it[k] * inv)
+        logger.info("OCR 多尺度命中: %d → %d 词 (scale=%.2f)",
+                    base_words, sum(1 for it in items2 if not it.get("line")), scale)
+        return items2
+    return items
 
 
 def find_text(items: list[dict], target: str) -> Optional[dict]:

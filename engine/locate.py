@@ -64,6 +64,51 @@ def _draw_grid(img, cols: int = 3, rows: int = 3):
     return out, cells
 
 
+# 元素标注配色（按来源）
+_SOURCE_COLORS = {
+    "ocr": "#00C853",   # 绿：OCR 文字（精确）
+    "vl": "#FF9800",    # 橙：VL 识别（近似）
+    "cv": "#2196F3",    # 蓝：CV 候选框（无语义）
+    "memory": "#9C27B0"  # 紫：记忆库
+}
+
+
+def annotate_elements(img, numbered: list[dict]):
+    """在图像副本上画出注册元素并标号（e1..eN）。
+
+    有 left/top/right/bottom 的画真实边框；只有中心点的画固定小方框。
+    标签为元素 id（与 elements_card 一一对应），带底色保证可读。
+    """
+    from PIL import ImageDraw, ImageFont
+
+    out = img.copy()
+    draw = ImageDraw.Draw(out)
+    w, h = out.size
+    try:
+        font = ImageFont.truetype("arial.ttf", max(14, w // 110))
+    except Exception:
+        font = ImageFont.load_default()
+
+    for el in numbered:
+        color = _SOURCE_COLORS.get(el.get("source", ""), "#FF2222")
+        if all(el.get(k) is not None for k in ("left", "top", "right", "bottom")):
+            box = (el["left"], el["top"], el["right"], el["bottom"])
+        else:
+            # 只有中心点（VL 元素）：画固定小方框
+            r = 24
+            box = (el["x"] - r, el["y"] - r, el["x"] + r, el["y"] + r)
+        draw.rectangle(box, outline=color, width=3)
+        label = el["id"]
+        tx, ty = box[0], max(0, box[1] - font.size - 6)
+        try:
+            tb = draw.textbbox((tx, ty), label, font=font)
+            draw.rectangle((tb[0] - 2, tb[1] - 2, tb[2] + 4, tb[3] + 3), fill=color)
+        except Exception:
+            pass
+        draw.text((tx, ty), label, fill="white", font=font)
+    return out
+
+
 def draw_marker(img, x: int, y: int, color: str = "#FF2222"):
     """在图像副本的 (x, y) 处画十字准星标记（hover-verify 用，表示「将要点击这里」）。"""
     from PIL import ImageDraw

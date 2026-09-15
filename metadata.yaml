@@ -4,8 +4,8 @@ desc: 视觉方案 Windows 桌面操控 — 截图 + 本地 OCR + VL 模型三�
 help: |
   DeskHand v2（视觉方案）。安装后 LLM 可使用以下 9 个 Tool 操控 Windows 桌面：
 
-  look           — 看屏幕/窗口，返回编号元素卡片 e1..eN（默认只跑本地 OCR，约 1 秒；传 question 才调 VL）
-  scan_scene     — 场景结构识别（图形/游戏场景：VL 输出编号元素卡片，语义+类型+坐标+提示图标，合并 OCR）
+  look           — 看屏幕/窗口：编号元素卡片（OCR文字 + CV候选框）+ 元素标注图（多模态，主模型可直接看图）
+  scan_scene     — 场景结构识别（图形/游戏场景：VL 输出编号元素卡片 + 标注图，语义+类型+坐标+提示图标，合并 OCR）
   click          — 点击（element=eN 编号引用最省事；target 文字三级定位；或 x/y 裸坐标）
   type_text      — 输入文本（中文等非 ASCII 自动走剪贴板粘贴；可先自动点击聚焦）
   press_key      — 组合键（扫描码通道，游戏/SDL2/DirectInput 兼容）
@@ -24,7 +24,8 @@ help: |
   VL 模型配置：优先复用同时安装的 irmia_vision 插件的降级链；
   否则用本插件配置的 vl_provider_1/2/3（下拉）或 vl_model（手动）。
   本地 OCR 为可选增强：pip install winsdk 或 rapidocr-onnxruntime。
-version: v2.3.0
+  CV 候选框检测为可选增强：pip install opencv-python-headless。
+version: v2.4.0
 author: irmia2026
 repo: https://github.com/irmia2026/astrbot_plugin_deskhand
 astrbot_version: ">=4.16"

@@ -21,27 +21,28 @@ click(target="保存按钮")
 
 点击前还有 **hover-verify**：在落点画标记局部截图，让 VL 确认「准星是否压在目标上」，不对则按 VL 建议修正一次再确认。动作后自动 **ImageChops diff** 验证画面是否变化。
 
-## 工作方式：元素卡片，零运算
+## 工作方式：元素卡片 + 标注图，零运算
 
 LLM 不需要算坐标、不需要记文字、不需要解读验证字段——一切机械劳动都在插件内部：
 
 ```
-1. look()                  → 返回编号元素卡片（约 1 秒，本地 OCR 免费）
+1. look()                  → 编号元素卡片（约 1 秒，OCR + CV 双通道，免费）
      e1 [text] 保存 (920,490)
      e2 [text] 搜索插件 (959,491)
-     e3 [input] 用户名 (640,320)
+     e3 [box] — (640,320)
+   + 元素标注图（框和编号与卡片一一对应，主模型可直接看图，自行发现遗漏元素）
 2. click(element="e2")     → 插件自动完成 定位→确认→点击→验证
 3. 返回 verdict            → success / uncertain / failed + 一句中文结论
 ```
 
-图形/游戏场景（OCR 读不出文字）改用 `scan_scene`——同样的编号卡片，元素来自视觉模型。
+元素来源三通道：**OCR 文字**（精确）、**CV 候选框**（OpenCV 轮廓检测，凡有边框的东西都标出来，无语义）、**VL 识别**（scan_scene，图形/游戏场景的语义仲裁）。OCR 还有多尺度重试：小字号首遍识别不足时自动放大再来，坐标永远保持原图空间。
 
 ## 九个工具
 
 | 工具 | 功能 | 示例 |
 |------|------|------|
-| `look` | 看屏幕/窗口，返回编号元素卡片（默认只跑本地 OCR；传 question 才调 VL） | `look(window="QQ")` |
-| `scan_scene` | 场景结构识别（图形/游戏场景：VL 输出编号元素卡片） | `scan_scene(window="游戏")` |
+| `look` | 看屏幕/窗口，编号元素卡片 + **元素标注图（多模态）** | `look(window="QQ")` |
+| `scan_scene` | 场景结构识别（图形/游戏场景：VL 编号卡片 + 标注图） | `scan_scene(window="游戏")` |
 | `click` | 点击（**element=eN 编号引用** / target 三级定位 / x,y 直点） | `click(element="e2")` |
 | `type_text` | 输入文本（中文自动走剪贴板，无障碍） | `type_text(text="你好", target="输入框")` |
 | `press_key` | 组合键（**扫描码通道**，游戏/SDL2/DirectInput 兼容） | `press_key(keys=["ctrl","s"])` |
@@ -74,6 +75,12 @@ pip install winsdk                      # WinRT 系统 OCR（Windows 10+，推�
 pip install rapidocr-onnxruntime        # 本地模型 OCR（跨平台）
 ```
 
+**可选增强（CV 候选框检测）**：
+
+```bash
+pip install opencv-python-headless      # 轮廓检测：凡有边框的元素都框选标定（无语义）
+```
+
 ## VL 模型配置（三选一）
 
 1. **零配置**：同时安装了 [irmia_vision](https://github.com/irmia2026/astrbot_plugin_irmia_vision) 插件 → 自动复用它的 VL 降级链；
@@ -94,6 +101,7 @@ pip install rapidocr-onnxruntime        # 本地模型 OCR（跨平台）
 ## 注意事项
 
 - 仅支持 Windows；需要桌面会话（远程桌面最小化时截图会黑屏）。
+- **标注图（多模态）需要主模型支持图像输入**：AstrBot 会把图片喂给 provider 配置里 `modalities` 含 image 的聊天模型；纯文本模型自动只收到文字卡片，功能不受影响。
 - 中文输入默认走剪贴板粘贴通道（实测最可靠），纯 ASCII 走 SendInput 逐键注入；配置项 `input_method` 可强制切换（auto/unicode/clipboard）。粘贴会短暂占用剪贴板，用后自动恢复**文本**内容（图片/文件等非文本内容无法恢复，请注意）。
 - 键盘注入只对「系统前台焦点」生效：`type_text` 建议传 `target` 让插件先真实点击聚焦。
 - 操作坐标一律为屏幕原生像素（插件内部已处理 DPI），LLM 无需也不应自行换算坐标。
