@@ -441,9 +441,18 @@ async def look(window: str = "", question: str = "", grid: bool = False,
     win_area = float(w0 * h0)
     if win is not None and bool(_cfg("uia_enabled", True)) and uia.available():
         try:
-            uia_els = await desktop.run(uia.list_elements, win["hwnd"], bbox)
+            uia_stats: dict = {}
+            uia_els = await desktop.run(uia.list_elements, win["hwnd"], bbox, 18, uia_stats)
             if uia_els:
                 result["uia_elements"] = len(uia_els)
+            if uia_stats:
+                result["uia_detail"] = uia_stats
+                if uia_stats.get("truncated"):
+                    result["uia_note"] = (
+                        f"UIA 控件树在「{uia_stats.get('truncated_reason')}」处截断"
+                        f"（已访问 {uia_stats.get('visited')} 个节点，{uia_stats.get('elapsed')}s）——"
+                        f"卡片可能未包含全部控件；屏幕上没框的东西可用 click(x, y) 直点"
+                    )
         except Exception as e:
             result["uia_error"] = str(e)
     if use_ocr and bool(_cfg("ocr_enabled", True)) and ocr.available():

@@ -25,8 +25,20 @@ from typing import Optional
 
 logger = logging.getLogger("deskhand.uia")
 
-_MAX_DEPTH = 6
-_MAX_COUNT = 200
+_MAX_DEPTH = 20   # 遍历深度上限
+_MAX_COUNT = 1500  # 单次遍历节点数上限
+_TIME_BUDGET = 2.0  # 单次遍历时间预算（秒）——防慢 provider
+#
+# 为什么从「深度 6 / 200 节点」（POC 时的拍脑袋保险丝）改成上面这组：
+# 真实实测（probe_uia_depth.py，同一台机器）：深度 6 会大量丢控件——
+#   msedge 6→40 个、explorer 37→125 个、AstrBot 桌面端 0→60 个、msedgewebview2 1→6 个；
+# 而节点量与耗时几乎不涨（深度 20 时最多 482 节点 / 0.49s）。
+# 也就是说：真正卡住控件发现的是**深度**，不是数量；数量/时间上限只当安全保险丝。
+# 慢 provider（实测 Bandizip/updater 单次 UIA 调用 ~300ms，深度 14 要 14s）靠时间预算兜，
+# 并记住这个应用（_slow_cache），后续 5 分钟内自动换成低预算模式。
+_MAX_DEPTH_SLOW = 6      # 慢 provider 模式下的深度
+_TIME_BUDGET_SLOW = 0.8  # 慢 provider 模式下的时间预算
+_SLOW_TTL = 300.0        # 慢 provider 记忆时长（秒）
 
 # click 重新定位控件时的最大中心距（像素）
 _MAX_REMATCH_DIST = 24
@@ -48,6 +60,7 @@ _TITLE_STRIP_BASE_PX = 48  # 96 DPI 下的标题栏条带高度
 _EMPTY_TTL = 120.0
 _SLOW_EMPTY_SEC = 0.5
 _empty_cache: dict[tuple, float] = {}  # (hwnd, app_key) -> 缓存时间戳（monotonic）
+_slow_cache: dict[tuple, float] = {}   # 同上：命中过时间预算的“慢 provider”应用
 
 
 def _is_minimized(hwnd: int) -> bool:
@@ -266,16 +279,19 @@ def _roots_for(hwnd: int, win_rect=None) -> list:
 
 
 def _collect_controls(hwnd: int, win_rect=None, max_depth: int = _MAX_DEPTH,
-                      max_count: int = _MAX_COUNT) -> dict:
-    """遍历窗口 UIA 子树。深度 ≤6、总数 ≤200 封顶，标题栏 chrome 整棵跳过。
+                      max_count: int = _MAX_COUNT,
+                      time_budget: float = _TIME_BUDGET) -> dict:
+    """遍历窗口 UIA 子树。深度/数量/时间三重封顶，标题栏 chrome 整棵跳过。
 
-    返回 {"controls": [{ctrl,name,type,rect,pats}], "chrome_skipped": int, "truncated": bool}。
+    返回 {"controls": [...], "chrome_skipped": int, "truncated": bool,
+          "truncated_reason": str, "visited": int, "elapsed": float}。
     返回的 ctrl 引用只在当次调用内使用（同线程、短命），绝不跨调用持有。
     """
     uia = _u()
     out: list[dict] = []
     chrome_skipped = 0
     truncated = False
+    reason = ""
     title_bar_type = getattr(uia.ControlType, "TitleBarControl", None)
     strip_bottom = None
     if win_rect:
@@ -283,9 +299,15 @@ def _collect_controls(hwnd: int, win_rect=None, max_depth: int = _MAX_DEPTH,
 
     stack = [(c, 0) for c in _roots_for(hwnd, win_rect)]
     seen = 0
+    t0 = time.monotonic()
     while stack:
         if seen >= max_count:
-            truncated = True
+            truncated, reason = True, "max_count"
+            break
+        # 每轮都查时间预算：慢 provider 单节点就要 ~300ms，若隔 N 个节点才查一次，
+        # 预算会被远远突破（实测 Bandizip 在“每 16 节点查一次”下跑了 4.85s）
+        if time_budget and time.monotonic() - t0 > time_budget:
+            truncated, reason = True, "time_budget"
             break
         ctrl, depth = stack.pop()
         seen += 1
@@ -316,7 +338,9 @@ def _collect_controls(hwnd: int, win_rect=None, max_depth: int = _MAX_DEPTH,
                     stack.append((ch, depth + 1))
             except Exception:
                 pass
-    return {"controls": out, "chrome_skipped": chrome_skipped, "truncated": truncated}
+    return {"controls": out, "chrome_skipped": chrome_skipped,
+            "truncated": truncated, "truncated_reason": reason,
+            "visited": seen, "elapsed": round(time.monotonic() - t0, 2)}
 
 
 def _title_strip_height(hwnd: int) -> int:
@@ -363,11 +387,14 @@ def _signature(controls: list[dict]) -> frozenset:
 
 # ── 感知：元素卡片 ──────────────────────────────────────────────
 
-def list_elements(hwnd: int, win_rect=None, limit: int = 18) -> list[dict]:
+def list_elements(hwnd: int, win_rect=None, limit: int = 18,
+                  stats: Optional[dict] = None) -> list[dict]:
     """遍历窗口 UIA 树，返回元素卡片用的 element 列表（屏幕坐标，source="uia"）。
 
     limit 默认 18：卡片总槽位是 40，UIA 先上图不代表可以占满——
     OCR 文本行是 Agent 理解界面的上下文，全被 UIA 挤掉反而降信息量（评审指出）。
+    stats（可选，传入则写入诊断）：visited / elapsed / truncated / truncated_reason /
+      slow_mode（该应用被判定为慢 provider，已切低预算模式）。
     同步阻塞，约定在 desktop.run() 线程中调用。
     """
     if not available():
@@ -379,19 +406,47 @@ def list_elements(hwnd: int, win_rect=None, limit: int = 18) -> list[dict]:
         if ts is not None:
             if time.monotonic() - ts < _EMPTY_TTL:
                 logger.debug("UIA 空树缓存命中（%s），跳过遍历", ckey[1] or ckey[0])
+                if stats is not None:
+                    stats.update({"cached_empty": True, "visited": 0, "elapsed": 0.0})
                 return []
             _empty_cache.pop(ckey, None)
 
+    # 慢 provider（实测单次调用 ~300ms 的应用）自动切低预算模式，避免每次 look 白等十几秒
+    slow_ts = _slow_cache.get(ckey)
+    slow_mode = False
+    if slow_ts is not None:
+        if time.monotonic() - slow_ts < _SLOW_TTL:
+            slow_mode = True
+        else:
+            _slow_cache.pop(ckey, None)
+
     t0 = time.monotonic()
-    collected = _collect_controls(hwnd, win_rect=win_rect)
+    collected = _collect_controls(
+        hwnd, win_rect=win_rect,
+        max_depth=_MAX_DEPTH_SLOW if slow_mode else _MAX_DEPTH,
+        time_budget=_TIME_BUDGET_SLOW if slow_mode else _TIME_BUDGET,
+    )
     cost = time.monotonic() - t0
     if collected["truncated"]:
-        # 大 Chrome/Electron 树会撞上 200 节点封顶：卡片可能不含真正的目标控件。
-        # 当前只报告事实（子区域 scope / cache request 优化留给后续版本）。
+        # 大 Chrome/Electron 树或慢 provider：卡片可能不含真正的目标控件——如实上报
         logger.info(
-            "UIA 控件树超过 %d 节点封顶（chrome 过滤 %d 个），卡片可能不完整",
-            _MAX_COUNT, collected["chrome_skipped"],
+            "UIA 控件树截断（原因=%s，访问 %d 节点，耗时 %.2fs，chrome 过滤 %d 个）",
+            collected["truncated_reason"], collected["visited"], cost,
+            collected["chrome_skipped"],
         )
+        if collected["truncated_reason"] == "time_budget" and not slow_mode:
+            _slow_cache[ckey] = time.monotonic()
+            logger.info("UIA 慢 provider 已记住（%s）：后续 %d 秒内改用低预算模式",
+                        ckey[1] or ckey[0], int(_SLOW_TTL))
+    if stats is not None:
+        stats.update({
+            "visited": collected["visited"],
+            "elapsed": collected["elapsed"],
+            "chrome_skipped": collected["chrome_skipped"],
+            "truncated": collected["truncated"],
+            "truncated_reason": collected["truncated_reason"],
+            "slow_mode": slow_mode,
+        })
     elements = []
     try:
         from . import desktop
@@ -444,7 +499,6 @@ def list_elements(hwnd: int, win_rect=None, limit: int = 18) -> list[dict]:
         _empty_cache[ckey] = time.monotonic()
         logger.debug("UIA 慢空树（%.2fs）已缓存 %s", cost, ckey[1] or ckey[0])
     return elements[:limit]
-
 
 # ── 执行：后台动作 ──────────────────────────────────────────────
 
