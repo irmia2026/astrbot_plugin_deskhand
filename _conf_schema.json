@@ -60,6 +60,11 @@
         "type": "bool",
         "default": true
       },
+      "uia_enabled": {
+        "description": "启用 UIA 控件通道（窗口模式优先生效：UIA 元素可后台点击/写入，不抢焦点不动鼠标）",
+        "type": "bool",
+        "default": true
+      },
       "memory_enabled": {
         "description": "启用元素记忆库（成功定位的元素下次直接用历史坐标）",
         "type": "bool",

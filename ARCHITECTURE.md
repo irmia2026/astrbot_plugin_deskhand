@@ -1,6 +1,6 @@
-# 🏗️ DeskHand v2 架构设计（视觉方案）
+# 🏗️ DeskHand v2 架构设计（视觉为基础 + UIA L0 快速通道）
 
-> 版本 v2.6.0 · 2026-08 · 全面转向视觉方案
+> 版本 v2.6.1 · 2026-08 · 视觉方案为基础，UIA 作为可选 L0 层回归
 
 ---
 
@@ -13,7 +13,8 @@ astrbot_plugin_deskhand/
 ├── requirements.txt           # Pillow / pywin32 / httpx
 ├── _conf_schema.json          # VL 模型配置 + 定位与行为开关
 ├── engine/
-│   ├── desktop.py             # 单线程执行器、DPI 感知、窗口枚举、虚拟屏原点、hwnd 记忆
+│   ├── desktop.py             # 单线程执行器、DPI 感知、STA COM 初始化、窗口枚举、虚拟屏原点、hwnd 记忆
+│   ├── uia.py                 # UIA L0：控件树遍历、pattern 路由（Invoke/SetValue）、状态回读验证（可选依赖）
 │   ├── input.py               # win32 键鼠（SendInput UNICODE / 剪贴板粘贴 / 扫描码按键）
 │   ├── ocr.py                 # 本地 OCR：WinRT（winsdk）→ RapidOCR → 无（可插拔）
 │   ├── vl.py                  # VL 客户端：复用 irmia_vision 降级链或内置解析
@@ -33,22 +34,30 @@ astrbot_plugin_deskhand/
 
 | 层级 | 手段 | VL 调用次数 | 精度 |
 |------|------|------------|------|
+| L0 | UIA 控件树（窗口模式先行） | 0 | 控件级精确（带 pattern 可后台执行） |
 | L1 | 元素记忆库（历史坐标 + aHash 签名验证） | 0 | 精确（历史落点） |
 | L2 | 本地 OCR 文字匹配 | 0 | 像素级 |
 | L3 | VL 网格漏斗（粗定位格子 → 裁剪放大 → 指点像素） | 1-2 | 近似（配合 hover-verify） |
+
+L0 仅窗口模式启用（全屏无句柄，控件树无意义），且失败时静默回落 L1→L2→L3；
+scan_scene（图形/游戏场景）不走 UIA。UIA 不可用（未装 uiautomation）时整层消失，其余链路不变。
 
 ## 一次 click 的完整链路
 
 ```
 click(target="保存")
   → desktop 线程截窗口图（DPI 感知，坐标=像素）
+  → L0 UIA 控件树（仅窗口模式）：控件级元素 + pattern 探测
   → L1 记忆命中？（签名汉明距离 ≤10 直接返回）
   → L2 OCR 找文字（跨池最佳匹配：词级精确 > 行级精确 > 包含，防同行多按钮误点）
   → L3 VL 漏斗（3×3 网格 → 裁剪 → 像素坐标，按预缩放比例换算回屏幕）
   → hover-verify：落点画红色准星，局部 320×320 截图让 VL 确认/给修正量（最多 2 次）
-  → win32 分段移动 + 点击
-  → ImageChops diff 前后截图（~10ms/1080p），返回 changed/percent/region
-  → 记忆库 upsert（成功 hits+1 并更新坐标/签名；失败只 fails+1 不覆盖旧记忆；连续失败 3 次淘汰）
+  → 执行路由：
+       UIA 元素且控件带 pattern → 后台 Invoke/Toggle/ExpandCollapse/SelectionItem（不动鼠标）
+       type_text 遇 ValuePattern → 后台 SetValue
+       其余 → win32 分段移动 + 真实点击
+  → 验证分层：状态回读（ToggleState/Value）> 树结构变化 > ImageChops 屏幕 diff（仅前台）
+  → 记忆库 upsert（UIA 路径不写记忆：控件树本身就是实时真值）
 ```
 
 ## 关键工程决策
@@ -66,6 +75,15 @@ click(target="保存")
 | FunctionTool 子类化 + call() 重写 | AstrBot v4.16+ 执行器原生支持，不依赖 star_manager 的 partial 回绑时机 |
 | 显式设置 handler_module_path | 保证插件卸载/重载时工具被正确清理 |
 | VL 降级链优先复用 irmia_vision | 两插件并存时零重复配置；软依赖，缺失自动回退内置解析 |
+| UIA 回归为 L0 而非主路径 | v1 因 COM 线程模型废掉；此次在 desktop 单线程内做 STA 初始化 + 惰性导入（模块级 COM 对象必须在执行线程创建），可用则快、不可用则整层消失 |
+| UIA 动作时**重新遍历按中心距重定位**，不缓存 Control | Control/Pattern 官方禁止跨线程、跨调用持有；重定位天然免疫快照过期 |
+| 标题栏 chrome 整棵子树 + 标题栏条带内关键词双规则过滤 | Win32/WinForms 的 chrome 按钮挂在 TitleBarControl 下，UWP 没有 TitleBarControl（实测）——只靠任一条会漏 |
+| 后台操作不宣称「绝不抢焦点」，而是如实回传 focus_changed | WinForms TextBox 经 MSAA 桥 SetValue 实测会把窗口带到前台；“完全不静默”是错的，插件必须说实话 |
+| UIA 通道优先，同位置 12px 内的 OCR 条目不再上图；落在 UIA 控件内部的 CV 框跳过 | 三通道叠加会互相稀释卡片（实测 WinForms 夹具：3 个真控件 + 15 个 CV 重复框） |
+| UIA 动作前校验目标身份（名称相同 或 矩形 IoU ≥ 0.6） | UIA 元素没有图像签名可做新鲜度校验；界面翻页后同坐标可能已是**另一个输入框**，SetValue 回读会“成功”而内容是错的 |
+| 验证判据顺序：任一正向证据成立即成功 | 旧写法“有可读状态就只认状态”会把“状态未变但控件树变了”的真成功报成 failed |
+| UWP CoreWindow 类窗口需通过「中心点顶层窗口是不是它自己」校验 | UWP 最小化后会留下 visible=1 + rect 正常的幽灵 CoreWindow（实测其 rect 区域实际显示的是别的窗口）→ 不过滤就会截到错误内容 |
+| 慢空树缓存（仅缓存耗时 >0.5s 的空结果，TTL 120s，最小化不入缓存） | Nahimic/输入体验等应用的 UIA 查询要 1.2-1.4s 才返回空树；而快速返回空的 Electron/WebView2 必须每次重探（无障碍树常在首次查询后才激活） |
 
 ## 成本模型（deepseek-v4-flash-vision-exp 高峰价）
 
@@ -90,3 +108,4 @@ click(target="保存")
 | v2.4.0 | 2026-08 | 多模态 look/scan_scene：返回 CallToolResult 附元素标注图（AstrBot 缓存后喂给图像模态主模型）；CV 候选框检测通道（OpenCV 轮廓，凡有边框必标）；OCR 多尺度重试（小字号自动放大，坐标不外泄） |
 | v2.5.0 | 2026-08 | click(element) 现场校验+自愈：注册时存图像签名，点击前比对，失效先 OCR 重定位再点击，失败明确报 stale；CV 框窗口原点修复；屏外幽灵窗口过滤+同级优先非最小化；OCR 行级条目保中文整句；记忆库 app_key 改 exe 名防撞车；窗口遮挡告警；卡片/JSON 40 条一致 |
 | v2.6.0 | 2026-08 | 幽灵窗根治：无效 rect 跳档 + 进程名兜底（QQ NT 标题=会话名先天找不到，按 QQ.exe 取最大窗口）+ 诚实报错带 hwnd/iconic；OCR 多尺度真实修复（模块级 Image 导入缺失导致从未生效 + 词数/中位字高双触发）；剪贴板还原 3×100ms 重试 + clipboard_restored 回传；记忆库清理 class_name 时代死数据 |
+| v2.6.1 | 2026-08 | UIA L0 吸收：engine/uia.py 控件树遍历（STA COM + 惰性导入 + 空壳三级回退 + 深度/数量封顶 + 标题栏 chrome 过滤）；look 窗口模式 UIA 先行（青色元素，OCR 12px 去重、CV 内部框跳过）；click/type_text 执行路由（Invoke/Toggle/ExpandCollapse/SelectionItem、ValuePattern.SetValue）后台执行，失败静默回落 win32；验证分层（状态回读 > 控件树变化 > 屏幕 diff，仅前台）；焦点变化如实回传 focus_changed；对抗性评审修复：空壳回退 PID×矩形双过滤（防动作打到无关窗口）、UIA 目标身份校验（防静默写错输入框）、before 位图异常路径不泄漏、判据顺序修正；UWP 幽灵 CoreWindow 过滤；慢空树缓存 |

@@ -17,11 +17,26 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 
-def _init_worker() -> None:
-    """执行器线程初始化：声明 DPI 感知（进程级，幂等）。"""
+def _ensure_dpi_aware() -> None:
+    """声明 DPI 感知（进程级，幂等）。可在任意线程调用。"""
     if sys.platform == "win32":
         try:
             ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def _init_worker() -> None:
+    """执行器线程初始化：DPI 感知 + STA COM 初始化（UIA L0 用）。
+
+    CoInitializeEx(None, 0x2)：0x2=COINIT_APARTMENTTHREADED（STA）。
+    0x0=MTA 会触发 RPC_E_CHANGED_MODE；uiautomation 未安装时此调用也无害。
+    只在此线程做——不要在其它线程随手调（会改变该线程的未来套间模型）。
+    """
+    _ensure_dpi_aware()
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.ole32.CoInitializeEx(None, 0x2)
         except Exception:
             pass
 
@@ -71,6 +86,32 @@ def _rect_on_screen(rect) -> bool:
     return not (rect[2] <= left or rect[0] >= right or rect[3] <= top or rect[1] >= bottom)
 
 
+# UWP 应用窗口类：最小化后它会留下一个「IsWindowVisible=1 + rect 正常」的幽灵窗口，
+# 而它实际不在屏幕上（2026-09 实测：计算器最小化后 CoreWindow 报 rect (0,1,1800,1391)，
+# 但该区域实际显示的是别的窗口）——不过滤就会截到错误内容、污染整条定位链。
+_UWP_CORE_CLASS = "Windows.UI.Core.CoreWindow"
+
+
+def _self_displayed(hwnd: int, rect) -> bool:
+    """窗口中心点的顶层窗口是不是它自己（否则就是幽灵）。
+
+    只对 UWP CoreWindow 类使用：普通窗口被其他窗口遮挡是正常情形，
+    不能因此从枚举里剔除（那会让 find_window 找不到被遮住的窗口）。
+    """
+    import win32con
+    import win32gui
+
+    try:
+        cx = (rect[0] + rect[2]) // 2
+        cy = (rect[1] + rect[3]) // 2
+        top = win32gui.GetAncestor(
+            win32gui.WindowFromPoint((cx, cy)), win32con.GA_ROOT
+        )
+        return top == hwnd
+    except Exception:
+        return True  # 判定不了就不剔除（宁可多报，不可漏报）
+
+
 def enum_windows() -> list[dict]:
     """枚举可见顶层窗口：[{hwnd, title, rect, class_name, iconic}]，z-order 从顶到底。
 
@@ -106,12 +147,15 @@ def enum_windows() -> list[dict]:
                 return
             if not _rect_on_screen(rect):
                 return  # 幽灵窗口（坐标完全在屏外，如 -21333,-21333）
+            cls = win32gui.GetClassName(hwnd) or ""
+            if cls == _UWP_CORE_CLASS and not _self_displayed(hwnd, rect):
+                return  # 最小化 UWP 留下的幽灵 CoreWindow（rect 正常但不是它在屏幕上）
             found.append(
                 {
                     "hwnd": hwnd,
                     "title": title,
                     "rect": tuple(rect),
-                    "class_name": win32gui.GetClassName(hwnd) or "",
+                    "class_name": cls,
                     "iconic": False,
                 }
             )
@@ -326,7 +370,8 @@ def coord_space_info(size: tuple[int, int]) -> dict:
 
     进程是 DPI 感知的，截图和 win32 坐标都是物理像素；逻辑尺寸 = 物理 / (DPI/96)。
     """
-    _init_worker()  # 幂等：确保 DPI 感知已设置，GetDpiForSystem 才返回真实 DPI
+    _ensure_dpi_aware()  # 幂等：确保 DPI 感知已设置，GetDpiForSystem 才返回真实 DPI
+                         # （只做 DPI，不做 COM 初始化——本函数可能在调用方线程执行）
     phys_w, phys_h = int(size[0]), int(size[1])
     info = {"coordinate_space": "physical_pixels", "physical_size": [phys_w, phys_h]}
     try:

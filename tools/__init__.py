@@ -19,7 +19,7 @@ from typing import Optional
 
 from astrbot.api import FunctionTool as _AstrBotFunctionTool
 
-from ..engine import desktop, detect, input as inp, locate, memory as mem, ocr, scene, verify, vl
+from ..engine import desktop, detect, input as inp, locate, memory as mem, ocr, scene, uia, verify, vl
 
 # AstrBot 运行环境必有 mcp；本地测试无 mcp 时退化为纯文本返回
 try:
@@ -205,6 +205,14 @@ def _verdict(diff: dict, verified) -> tuple[str, str]:
     return "uncertain", "画面无可见变化：可能是无视觉反馈的操作，也可能未生效，拿不准就 look 一下"
 
 
+def _near_any(el: dict, existing: list[dict], dist: int = 12) -> bool:
+    """元素中心是否已落在已有元素 dist 像素邻域内（UIA/OCR/CV 跨通道去重）。"""
+    return any(
+        abs(el["x"] - e["x"]) < dist and abs(el["y"] - e["y"]) < dist
+        for e in existing
+    )
+
+
 def _merge_cv_boxes(elements: list[dict], boxes: list[dict],
                     origin_x: int = 0, origin_y: int = 0) -> int:
     """把 CV 候选框并入元素列表（与已有元素中心距 <20px 的跳过，防重复框）。
@@ -216,6 +224,16 @@ def _merge_cv_boxes(elements: list[dict], boxes: list[dict],
     for b in boxes:
         sx, sy = origin_x + b["x"], origin_y + b["y"]
         if any(abs(sx - e["x"]) < 20 and abs(sy - e["y"]) < 20 for e in elements):
+            continue
+        # UIA 已给出精确控件框时，落在该控件内部的 CV 框是同一控件的边框/内部装饰：
+        # 真实环境实测（WinForms 夹具）这类重复会把卡片从 3 条撑到 18 条，纯噪声
+        if any(
+            e.get("source") == "uia"
+            and e.get("left") is not None
+            and e["left"] - 4 <= sx <= e["right"] + 4
+            and e["top"] - 4 <= sy <= e["bottom"] + 4
+            for e in elements
+        ):
             continue
         elements.append({
             "name": "", "type": "box",
@@ -241,7 +259,8 @@ def _with_image(result: dict, shot, numbered: list[dict]):
     annotated.close()
     b64 = data_url.split(",", 1)[1]
     result["image_note"] = (
-        "附带元素标注图：框和编号与 elements_card 一一对应（绿=OCR文字/橙=VL/蓝=CV候选框）。"
+        "附带元素标注图：框和编号与 elements_card 一一对应"
+        "（青=UIA控件/绿=OCR文字/橙=VL/蓝=CV候选框）。"
         "图上有框但卡片里看不懂的东西可直接 click(element=eN)；"
         "图上发现遗漏元素（没框的）可 click(x, y) 直点坐标。"
     )
@@ -303,16 +322,30 @@ async def look(window: str = "", question: str = "", grid: bool = False,
     if occlusion_note:
         result["occlusion_warning"] = occlusion_note
 
-    # 元素双通道：OCR 文字（精确，行级条目保中文整句）+ CV 候选框（无语义但有框就标）
+    # 元素三通道：UIA 控件（窗口模式先行，后台可操作）→ OCR 文字（精确）→ CV 候选框
     elements: list[dict] = []
     if bbox:
         origin_x, origin_y = bbox[0], bbox[1]
     else:
         origin_x, origin_y = await desktop.run(desktop.virtual_screen_origin)
+    uia_count = 0
+    if win is not None and bool(_cfg("uia_enabled", True)) and uia.available():
+        try:
+            uia_els = await desktop.run(uia.list_elements, win["hwnd"], bbox)
+            elements.extend(uia_els)
+            uia_count = len(uia_els)
+            if uia_count:
+                result["uia_elements"] = uia_count
+        except Exception as e:
+            result["uia_error"] = str(e)
     if use_ocr and bool(_cfg("ocr_enabled", True)) and ocr.available():
         try:
             items = await desktop.run(ocr.recognize, shot)
-            elements = ocr.items_to_elements(items, origin_x, origin_y)[:80]
+            ocr_els = ocr.items_to_elements(items, origin_x, origin_y)[:80]
+            if uia_count:
+                # UIA 已覆盖的控件（中心距 12px）不再重复上 OCR 条目
+                ocr_els = [el for el in ocr_els if not _near_any(el, elements)]
+            elements.extend(ocr_els)
         except Exception as e:
             result["ocr_error"] = str(e)
     if use_cv:
@@ -505,6 +538,98 @@ async def scan_scene(window: str = "", max_elements: int = 30, image: bool = Tru
     return result
 
 
+async def _uia_click_result(el: dict, ures: dict, element: str, target: str,
+                            before, bbox: Optional[tuple],
+                            foreground: bool) -> dict:
+    """UIA 后台点击的结果组装。
+
+    验证分层：状态回读（ToggleState/ExpandCollapse/IsSelected）> 树结构变化
+    > 屏幕 diff（仅前台窗口——截图抓的是屏幕区域，后台/被遮挡窗口的像素不可信；
+    被遮挡窗口的像素级验证等 WGC 版本）。
+
+    判据顺序（评审修正）：**任一正向证据成立即算成功**。旧写法“有可读状态就只认
+    状态”会把“状态没变但控件树变了”的真成功报成 failed（如 toggle 打开了面板），
+    也会把真 failed 报成 uncertain——两者都是对被验证事实的误述。
+    """
+    verified = None
+    verify_method = "none"
+    diff = None
+    state_readable = ures.get("state_before") is not None
+    if ures.get("state_changed"):
+        verified, verify_method = True, "state_readback"
+    elif ures.get("tree_changed"):
+        verified, verify_method = True, "tree_change"
+    elif foreground and before is not None:
+        diff = await _post_action_diff(before, bbox)
+        verified, verify_method = bool(diff["meaningful"] or diff.get("text_changed")), "screen_diff"
+    elif state_readable:
+        # 无任何正向证据、但控件状态可读且未变——这才是可靠的 failed
+        verified, verify_method = False, "state_readback"
+    if before is not None:
+        before.close()
+
+    pattern = ures.get("pattern", "invoke")
+    focus_note = (
+        "（注意：该控件的框架实现把目标窗口带到了前台，本次并非完全静默）"
+        if ures.get("focus_changed") else ""
+    )
+    if verified is True and verify_method == "state_readback":
+        verdict, vtext = "success", (
+            f"后台 {pattern} 已执行，状态回读确认："
+            f"{ures.get('state_before')} → {ures.get('state_after')}"
+        )
+    elif verified is True and verify_method == "tree_change":
+        verdict, vtext = "success", f"后台 {pattern} 已执行，界面控件树已变化"
+    elif verified is True:
+        pct = (diff or {}).get("percent")
+        verdict, vtext = "success", (
+            f"后台 {pattern} 已执行（画面变化 {pct}%）" if pct
+            else f"后台 {pattern} 已执行（内容已变化）"
+        )
+    elif verified is False and verify_method == "state_readback":
+        verdict, vtext = "failed", (
+            f"后台 {pattern} 已送达但状态未变化，疑似未生效，建议 look 复查"
+        )
+    elif verified is False:
+        verdict, vtext = "uncertain", (
+            f"后台 {pattern} 已送达但画面无可见变化，可能是无视觉反馈的操作"
+        )
+    else:
+        verdict, vtext = "uncertain", (
+            f"后台 {pattern} 已送达（窗口不在前台，无法像素验证；"
+            f"该控件无状态回读）"
+        )
+    vtext += focus_note
+
+    return {
+        "ok": True,
+        "action": "click",
+        "target": target or None,
+        "element": element or None,
+        "x": el["x"], "y": el["y"],
+        "button": "left", "double": False,
+        "locate_source": "element:uia",
+        "landing_check": "skipped",
+        "relocated": False,
+        "uia": {
+            "pattern": pattern,
+            "control_name": ures.get("name"),
+            "state_before": ures.get("state_before"),
+            "state_after": ures.get("state_after"),
+        },
+        "verify_method": verify_method,
+        "focus_changed": bool(ures.get("focus_changed")),
+        "effective": verified is True,
+        "verdict": verdict,
+        "verdict_text": vtext,
+        "screen_changed": (diff or {}).get("meaningful"),
+        "text_changed": (diff or {}).get("text_changed"),
+        "change_percent": (diff or {}).get("percent"),
+        "change_region": (diff or {}).get("bbox"),
+        "hint": None if verified is True else vtext,
+    }
+
+
 async def click(target: str = "", element: str = "",
                 x: Optional[int] = None, y: Optional[int] = None,
                 window: str = "", button: str = "left", double: bool = False,
@@ -524,6 +649,46 @@ async def click(target: str = "", element: str = "",
         if win_title and win_title != "整个屏幕":
             win = await desktop.run(desktop.find_window, win_title)
         bbox0 = _win_bbox(win)
+
+        # UIA 元素：后台执行（Invoke/Toggle/...，不动鼠标），失败回退真实鼠标路径
+        if (
+            el.get("source") == "uia" and win is not None
+            and button == "left" and not double
+            and bool(_cfg("uia_enabled", True)) and uia.available()
+        ):
+            # 像素验证仅对前台窗口有意义（截图抓的是屏幕区域）
+            fg = await desktop.run(desktop.foreground_window)
+            foreground = bool(fg and fg.get("hwnd") == win.get("hwnd"))
+            before = (
+                await desktop.run(desktop.screenshot, bbox0) if foreground else None
+            )
+            expect_rect = (
+                (el["left"], el["top"], el["right"], el["bottom"])
+                if all(el.get(k) is not None for k in ("left", "top", "right", "bottom"))
+                else None
+            )
+            try:
+                ures = await desktop.run(
+                    uia.invoke_at, win["hwnd"], el["x"], el["y"],
+                    str(el.get("name", "") or ""), expect_rect,
+                )
+            except Exception as e:
+                # UIA 异常不得把已截的 before 位图泄漏出去，也不得打断整条链路：
+                # 记录后退回真实鼠标路径（Agent 无感）——评审指出的泄漏点
+                if before is not None:
+                    before.close()
+                ures = {"ok": False, "error": f"UIA 调用异常: {e}"}
+                logger.warning("UIA 后台点击异常，回退真实鼠标路径: %s", e)
+            if ures.get("ok"):
+                return await _uia_click_result(
+                    el, ures, element, target, before, bbox0, foreground
+                )
+            if before is not None:
+                before.close()
+            if ures.get("mismatch"):
+                # 目标身份不符：绝不能回退到鼠标点旧坐标（那正是点错控件），直接报 stale
+                return {"ok": False, "stale": True, "error": ures.get("error")}
+            logger.info("UIA 后台点击失败（%s），回退真实鼠标路径", ures.get("error"))
 
         # 现场校验：注册时的图像签名 vs 当前截图——弹窗遮挡/布局移动会被发现
         sig_then = el.get("crop_sig")
@@ -640,17 +805,78 @@ async def click(target: str = "", element: str = "",
     }
 
 
-async def type_text(text: str, target: str = "", window: str = "",
-                    focus: bool = True, **_) -> dict:
+async def type_text(text: str, target: str = "", element: str = "",
+                    window: str = "", focus: bool = True, **_) -> dict:
     """输入文本（auto: 中文等非 ASCII 走剪贴板粘贴，ASCII 走 SendInput）。
 
+    element 传 look 卡片编号时：若该元素是 UIA 输入控件，优先走
+    ValuePattern.SetValue 后台写入（不抢焦点不走剪贴板，回读校验）；
+    不支持时自动回退「点击聚焦 + 真实输入」。
     focus=True（默认）且传 target 时先点击目标聚焦；若光标已经在输入框里，
     传 focus=False 跳过聚焦点击——二次点击可能把焦点踢飞（面板重排）。
     """
     if not text:
         return {"ok": False, "error": "text 不能为空"}
     focused = None
-    if target and focus:
+    if element:
+        el = scene.resolve(element)
+        if el is None:
+            return {"ok": False,
+                    "error": f"元素「{element}」不存在或快照已过期（>{120}s），请重新 look/scan_scene"}
+        win_title = scene.current_window()
+        win = None
+        if win_title and win_title != "整个屏幕":
+            win = await desktop.run(desktop.find_window, win_title)
+        # UIA 输入控件：后台 SetValue（回读校验即确定性验证）
+        if (
+            win is not None and el.get("source") == "uia"
+            and bool(_cfg("uia_enabled", True)) and uia.available()
+        ):
+            expect_rect = (
+                (el["left"], el["top"], el["right"], el["bottom"])
+                if all(el.get(k) is not None for k in ("left", "top", "right", "bottom"))
+                else None
+            )
+            try:
+                sres = await desktop.run(
+                    uia.set_value_at, win["hwnd"], el["x"], el["y"], text,
+                    str(el.get("name", "") or ""), expect_rect,
+                )
+            except Exception as e:
+                sres = {"ok": False, "error": f"UIA 调用异常: {e}"}
+                logger.warning("UIA SetValue 异常，回退键鼠输入: %s", e)
+            if sres.get("mismatch"):
+                # 目标身份不符：回退键鼠会把文本打进“当前焦点所在”，比报错更危险
+                return {"ok": False, "stale": True, "error": sres.get("error")}
+            if sres.get("ok"):
+                verified = bool(sres.get("verified"))
+                vtext = (
+                    "后台写入已确认（状态回读一致）" if verified
+                    else "后台 SetValue 已执行但回读与预期不一致，建议 look 复查"
+                )
+                if sres.get("focus_changed"):
+                    vtext += "（注意：该控件的框架实现把目标窗口带到了前台，本次并非完全静默）"
+                return {
+                    "ok": True,
+                    "action": "type",
+                    "len": len(text),
+                    "input_method": "uia_setvalue",
+                    "element": element,
+                    "focused_target": el.get("name") or None,
+                    "verified": verified,
+                    "focus_changed": bool(sres.get("focus_changed")),
+                    "verdict": "success" if verified else "uncertain",
+                    "verdict_text": vtext,
+                    "screen_changed": None,
+                    "text_changed": None,
+                }
+            logger.info("UIA SetValue 失败（%s），回退键鼠输入", sres.get("error"))
+        if focus:
+            cres = await click(element=element, verify_click=False)
+            if not cres.get("ok"):
+                return {"ok": False, "error": f"聚焦目标失败: {cres.get('error')}"}
+            focused = cres
+    elif target and focus:
         cres = await click(target=target, window=window, verify_click=False)
         if not cres.get("ok"):
             return {"ok": False, "error": f"聚焦目标失败: {cres.get('error')}"}
@@ -864,7 +1090,7 @@ def register_all() -> list:
     return [
         make_tool(
             name="look",
-            description="看屏幕/窗口：返回编号元素卡片（e1..eN，OCR 文字 + CV 候选框双通道，约 1 秒免费）并附元素标注图（框和编号与卡片一一对应，可直接看图）。之后用 click(element=\"eN\") 点击卡片元素；图上发现遗漏元素可用 x/y 直点。window 传窗口标题关键词，留空截全屏；传 question 才调用视觉模型做场景分析（可选）；图形/游戏场景请改用 scan_scene。",
+            description="看屏幕/窗口：返回编号元素卡片（e1..eN，窗口模式 UIA 控件 + OCR 文字 + CV 候选框三通道，约 1 秒免费）并附元素标注图（框和编号与卡片一一对应，可直接看图）。之后用 click(element=\"eN\") 点击卡片元素（UIA 控件后台点击不抢焦点）；图上发现遗漏元素可用 x/y 直点。window 传窗口标题关键词，留空截全屏；传 question 才调用视觉模型做场景分析（可选）；图形/游戏场景请改用 scan_scene。",
             parameters={
                 "type": "object",
                 "properties": {
@@ -895,7 +1121,7 @@ def register_all() -> list:
         ),
         make_tool(
             name="click",
-            description="点击界面元素。三种方式按优先级：1) element=\"eN\" 直接引用 look/scan_scene 卡片里的编号元素（最省事）；2) target=元素界面文字，自动经 记忆→OCR→视觉模型 三级定位；3) x/y 裸坐标（屏幕原生像素，禁止自行换算）。点击后自动验证并返回 verdict（success/uncertain/failed 及中文结论）。",
+            description="点击界面元素。三种方式按优先级：1) element=\"eN\" 直接引用 look/scan_scene 卡片里的编号元素（最省事；UIA 控件自动后台执行，不抢焦点不动鼠标）；2) target=元素界面文字，自动经 记忆→OCR→视觉模型 三级定位；3) x/y 裸坐标（屏幕原生像素，禁止自行换算）。点击后自动验证并返回 verdict（success/uncertain/failed 及中文结论）。",
             parameters={
                 "type": "object",
                 "properties": {
@@ -919,6 +1145,7 @@ def register_all() -> list:
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "要输入的文本"},
+                    "element": {"type": "string", "description": "可选，look 卡片中的输入框编号（如 e2）；UIA 输入控件会后台写入（不抢焦点），无需先聚焦"},
                     "target": {"type": "string", "description": "可选，输入框描述（先自动点击聚焦）"},
                     "window": {"type": "string", "description": "可选，限定窗口"},
                 },

@@ -21,6 +21,7 @@ from .engine import vl as _vl
 
 _DEFAULT_CONFIG = {
     "ocr_enabled": True,
+    "uia_enabled": True,
     "memory_enabled": True,
     "hover_verify": True,
     "max_zoom": 2,
@@ -73,10 +74,19 @@ class DeskHandPlugin(star.Star):
             t.handler_module_path = __name__
 
         ocr_state = "可用" if self._ocr_available() else "不可用（安装 winsdk 或 rapidocr-onnxruntime 可开启）"
+        uia_state = "可用" if self._uia_available() else "未安装（pip install uiautomation 可开启后台操作）"
         logger.info(
             f"DeskHand v2 已加载 — {len(tools)} 个工具 | VL: {'可用' if _vl.vl_available() else '未配置'} | "
-            f"OCR: {ocr_state} | 记忆库: {'开启' if self._memory else '关闭'}"
+            f"OCR: {ocr_state} | UIA: {uia_state} | 记忆库: {'开启' if self._memory else '关闭'}"
         )
+
+    @staticmethod
+    def _uia_available() -> bool:
+        try:
+            from .engine import uia
+            return uia.available()
+        except Exception:
+            return False
 
     @staticmethod
     def _ocr_available() -> bool:

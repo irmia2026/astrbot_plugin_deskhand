@@ -1,13 +1,13 @@
 name: astrbot_plugin_deskhand
 display_name: 弥亚之手
-desc: 视觉方案 Windows 桌面操控 — 截图 + 本地 OCR + VL 模型三级定位，让 LLM Agent 操作任意桌面软件
+desc: 视觉方案 Windows 桌面操控 — 截图 + UIA 控件树 + 本地 OCR + VL 模型多层定位，让 LLM Agent 操作任意桌面软件
 help: |
   DeskHand v2（视觉方案）。安装后 LLM 可使用以下 9 个 Tool 操控 Windows 桌面：
 
-  look           — 看屏幕/窗口：编号元素卡片（OCR文字 + CV候选框）+ 元素标注图（多模态，主模型可直接看图）
+  look           — 看屏幕/窗口：编号元素卡片（UIA控件 + OCR文字 + CV候选框）+ 元素标注图（多模态，主模型可直接看图）
   scan_scene     — 场景结构识别（图形/游戏场景：VL 输出编号元素卡片 + 标注图，语义+类型+坐标+提示图标，合并 OCR）
-  click          — 点击（element=eN 编号引用最省事；target 文字三级定位；或 x/y 裸坐标）
-  type_text      — 输入文本（中文等非 ASCII 自动走剪贴板粘贴；可先自动点击聚焦）
+  click          — 点击（element=eN 编号引用最省事，UIA 元素后台执行不移动鼠标；target 文字三级定位；或 x/y 裸坐标）
+  type_text      — 输入文本（UIA 输入框后台写入；否则中文等非 ASCII 自动走剪贴板粘贴）
   press_key      — 组合键（扫描码通道，游戏/SDL2/DirectInput 兼容）
   scroll         — 滚动（垂直/水平，可按目标定位）
   drag           — 坐标拖拽
@@ -15,17 +15,19 @@ help: |
   window_action  — 窗口管理（min/max/restore/close/focus/topmost/move/resize，含 hwnd 记忆）
 
   工程增强（不纯依赖 VL 模型）：
+  - UIA 控件通道（L0，窗口模式先行）：控件级精确坐标；带 pattern 的控件走后台 Invoke/SetValue，不移动鼠标
   - 元素记忆库：成功定位过的元素下次直接用历史坐标 + 图像签名验证，0 次模型调用
   - 本地 OCR：文字类目标直接拿到精确像素坐标，不需要 VL 输出坐标
   - VL 网格漏斗：VL 只做粗定位（格子），裁剪放大后精定位，对抗图片 token 上限
   - hover-verify：点击前局部截图让 VL 确认落点，大幅降低点错率
-  - ImageChops diff：动作前后确定性验证「画面是否变化」
+  - ImageChops diff：动作前后确定性验证「画面是否变化」；UIA 路径优先用状态回读/树变化验证
 
   VL 模型配置：优先复用同时安装的 irmia_vision 插件的降级链；
   否则用本插件配置的 vl_provider_1/2/3（下拉）或 vl_model（手动）。
   本地 OCR 为可选增强：pip install winsdk 或 rapidocr-onnxruntime。
   CV 候选框检测为可选增强：pip install opencv-python-headless。
-version: v2.6.0
+  UIA 控件通道为可选增强（在 requirements.txt 内，默认安装 uiautomation）。
+version: v2.6.1
 author: irmia2026
 repo: https://github.com/irmia2026/astrbot_plugin_deskhand
 astrbot_version: ">=4.16"
