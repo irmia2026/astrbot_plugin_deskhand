@@ -65,8 +65,18 @@ _WINDOW_ALIASES = {
 }
 
 
+def _rect_on_screen(rect) -> bool:
+    """矩形是否与虚拟屏有交集（过滤 -21333 这类完全在屏外的幽灵窗口）。"""
+    left, top, right, bottom = screen_bounds()
+    return not (rect[2] <= left or rect[0] >= right or rect[3] <= top or rect[1] >= bottom)
+
+
 def enum_windows() -> list[dict]:
-    """枚举可见顶层窗口：[{hwnd, title, rect, class_name}]，z-order 从顶到底。"""
+    """枚举可见顶层窗口：[{hwnd, title, rect, class_name, iconic}]，z-order 从顶到底。
+
+    过滤：不可见、系统窗、极小窗、矩形完全在虚拟屏之外的幽灵窗口。
+    最小化窗口保留（rect=None）——否则 min 之后 restore 会匹配不到原窗口。
+    """
     import win32gui
 
     found: list[dict] = []
@@ -94,6 +104,8 @@ def enum_windows() -> list[dict]:
             rect = win32gui.GetWindowRect(hwnd)
             if rect[2] - rect[0] < 80 or rect[3] - rect[1] < 60:
                 return
+            if not _rect_on_screen(rect):
+                return  # 幽灵窗口（坐标完全在屏外，如 -21333,-21333）
             found.append(
                 {
                     "hwnd": hwnd,
@@ -145,7 +157,11 @@ def recall_window(keyword: str) -> Optional[int]:
 
 
 def find_window(keyword: str) -> Optional[dict]:
-    """按标题关键词匹配窗口：别名展开 → 精确匹配 → 包含匹配。返回 None 表示未找到。"""
+    """按标题关键词匹配窗口：别名展开 → 精确匹配 → 包含匹配；同级优先非最小化窗口。
+
+    最小化的幽灵窗口（如标题恰好叫「QQ」的最小化窗口）会在精确匹配档被跳过，
+    避免抢走真实窗口的匹配——需要操作最小化窗口时用 window_action。
+    """
     kw = (keyword or "").strip().lower()
     if not kw:
         return None
@@ -155,14 +171,17 @@ def find_window(keyword: str) -> Optional[dict]:
         kws.append(expanded)
 
     wins = enum_windows()
-    for w in wins:
-        if w["title"].lower().strip() in kws:
-            return w
-    for w in wins:
-        t = w["title"].lower()
-        if any(k in t for k in kws):
-            return w
-    return None
+
+    def _pick(candidates: list) -> Optional[dict]:
+        normal = [w for w in candidates if not w.get("iconic")]
+        return (normal or candidates or [None])[0]
+
+    exact = [w for w in wins if w["title"].lower().strip() in kws]
+    hit = _pick(exact)
+    if hit:
+        return hit
+    contains = [w for w in wins if any(k in w["title"].lower() for k in kws)]
+    return _pick(contains)
 
 
 def foreground_window() -> Optional[dict]:
@@ -198,6 +217,31 @@ def valid_rect(rect) -> bool:
         return False
     left, top, right, bottom = rect
     return right > left and bottom > top and left > -30000 and top > -30000
+
+
+def app_key(win: dict) -> str:
+    """窗口所属应用的稳定标识（记忆库键）：优先 exe 文件名，兜底 class_name。
+
+    用 class_name 会在 Chrome_WidgetWin_1 系（浏览器/QQ/各种 Electron）之间撞车。
+    """
+    import os
+
+    try:
+        import win32api
+        import win32process
+
+        _, pid = win32process.GetWindowThreadProcessId(win["hwnd"])
+        h = win32api.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        try:
+            exe = win32process.GetModuleFileNameEx(h, 0)
+        finally:
+            win32api.CloseHandle(h)
+        name = os.path.basename(exe).strip().lower()
+        if name:
+            return name
+    except Exception:
+        pass
+    return (win.get("class_name") or "unknown").lower()
 
 
 # ── 截图 ────────────────────────────────────────────────────────

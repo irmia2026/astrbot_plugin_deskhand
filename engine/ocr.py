@@ -217,6 +217,38 @@ def recognize(image, min_words: int = 8) -> list[dict]:
     return items
 
 
+def items_to_elements(items: list[dict], origin_x: int = 0, origin_y: int = 0) -> list[dict]:
+    """把 OCR items 转成元素卡片用的 element 列表（含屏幕坐标与 bbox）。
+
+    行级条目优先（WinRT 构造的整行能保住中文整句——「弥亚之手」是一个元素，
+    而不是「弥」「亚」「之」「手」四个）；不被任何行覆盖的词级条目作补充。
+    """
+    lines = [it for it in items if it.get("line")]
+    words = [it for it in items if not it.get("line")]
+
+    def to_el(it) -> dict:
+        return {
+            "name": it["text"], "type": "text",
+            "x": origin_x + it["cx"], "y": origin_y + it["cy"],
+            "left": origin_x + it["left"], "top": origin_y + it["top"],
+            "right": origin_x + it["right"], "bottom": origin_y + it["bottom"],
+            "has_icon": False, "source": "ocr",
+        }
+
+    if not lines:
+        return [to_el(it) for it in words]
+    elements = [to_el(it) for it in lines]
+    for w in words:
+        cx, cy = w["cx"], w["cy"]
+        covered = any(
+            ln["left"] <= cx <= ln["right"] and ln["top"] <= cy <= ln["bottom"]
+            for ln in lines
+        )
+        if not covered:
+            elements.append(to_el(w))
+    return elements
+
+
 def find_text(items: list[dict], target: str) -> Optional[dict]:
     """在 OCR 结果中查找目标文字（忽略大小写与空白）。
 

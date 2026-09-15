@@ -182,7 +182,7 @@ async def locate(target: str, *, window_kw: str = "", use_memory: bool = True,
     else:
         win = await desktop.run(desktop.foreground_window)
     bbox = win["rect"] if win and desktop.valid_rect(win.get("rect")) else None
-    app_key = (win.get("class_name") or "unknown") if win else "unknown"
+    app_key = desktop.app_key(win) if win else "unknown"
 
     # 当前截图（L1 验证 / L2 OCR / L3 漏斗都基于同一帧，保证一致性）
     shot = await desktop.run(desktop.screenshot, bbox)
