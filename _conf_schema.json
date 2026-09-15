@@ -72,6 +72,11 @@
         "type": "bool",
         "default": true
       },
+      "wgc_enabled": {
+        "description": "启用 WGC 窗口截图（被遮挡/非前台窗口的像素级验证靠它；需 winsdk，未装自动禁用）",
+        "type": "bool",
+        "default": true
+      },
       "memory_enabled": {
         "description": "启用元素记忆库（成功定位的元素下次直接用历史坐标）",
         "type": "bool",

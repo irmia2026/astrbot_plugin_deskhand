@@ -23,6 +23,7 @@ _DEFAULT_CONFIG = {
     "ocr_enabled": True,
     "ocr_multiscale": "auto",
     "uia_enabled": True,
+    "wgc_enabled": True,
     "memory_enabled": True,
     "hover_verify": True,
     "max_zoom": 2,
@@ -76,10 +77,19 @@ class DeskHandPlugin(star.Star):
 
         ocr_state = "可用" if self._ocr_available() else "不可用（安装 winsdk 或 rapidocr-onnxruntime 可开启）"
         uia_state = "可用" if self._uia_available() else "未安装（pip install uiautomation 可开启后台操作）"
+        wgc_state = "可用" if self._wgc_available() else "不可用（需 winsdk；被遮挡窗口将只做状态验证）"
         logger.info(
             f"DeskHand v2 已加载 — {len(tools)} 个工具 | VL: {'可用' if _vl.vl_available() else '未配置'} | "
-            f"OCR: {ocr_state} | UIA: {uia_state} | 记忆库: {'开启' if self._memory else '关闭'}"
+            f"OCR: {ocr_state} | UIA: {uia_state} | WGC: {wgc_state} | 记忆库: {'开启' if self._memory else '关闭'}"
         )
+
+    @staticmethod
+    def _wgc_available() -> bool:
+        try:
+            from .engine import wgc
+            return wgc.available()
+        except Exception:
+            return False
 
     @staticmethod
     def _uia_available() -> bool:
@@ -108,5 +118,10 @@ class DeskHandPlugin(star.Star):
         try:
             from .engine import desktop as _desktop
             _desktop.shutdown()
+        except Exception:
+            pass
+        try:
+            from .engine import wgc as _wgc
+            _wgc.close_all()  # 释放 WGC 长驻会话（GPU 资源）
         except Exception:
             pass

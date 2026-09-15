@@ -16,7 +16,8 @@ help: |
 
   工程增强（不纯依赖 VL 模型）：
   - 元素槽位按通道保底配额分配（UIA/OCR/CV 各有一份），截断时卡片上带提示；不再出现“某个通道被整体挤掉却不告知”
-  - UIA 控件通道（L0，窗口模式先行）：控件级精确坐标；带 pattern 的控件走后台 Invoke/SetValue，不移动鼠标  - 元素记忆库：成功定位过的元素下次直接用历史坐标 + 图像签名验证，0 次模型调用
+  - UIA 控件通道（L0，窗口模式先行）：控件级精确坐标；带 pattern 的控件走后台 Invoke/SetValue，不移动鼠标
+  - 控件树遍历走 CacheRequest 子树缓存（一次跨进程调用拉回整棵子树，实测比逐节点快 3～14×）  - 元素记忆库：成功定位过的元素下次直接用历史坐标 + 图像签名验证，0 次模型调用
   - 本地 OCR：文字类目标直接拿到精确像素坐标，不需要 VL 输出坐标
   - VL 网格漏斗：VL 只做粗定位（格子），裁剪放大后精定位，对抗图片 token 上限
   - hover-verify：点击前局部截图让 VL 确认落点，大幅降低点错率
@@ -25,10 +26,11 @@ help: |
   VL 模型配置：优先复用同时安装的 irmia_vision 插件的降级链；
   否则用本插件配置的 vl_provider_1/2/3（下拉）或 vl_model（手动）。
   本地 OCR 为可选增强：pip install winsdk 或 rapidocr-onnxruntime。
+  WGC 窗口截图为可选增强：pip install windows-capture（被遮挡窗口的像素级验证靠它）。
   小字号屏幕会自动分块放大重识（配置项 ocr_multiscale：auto/force/off）。
   CV 候选框检测为可选增强：pip install opencv-python-headless。
   UIA 控件通道为可选增强（在 requirements.txt 内，默认安装 uiautomation）。
-version: v2.6.3
+version: v2.6.4
 author: irmia2026
 repo: https://github.com/irmia2026/astrbot_plugin_deskhand
 astrbot_version: ">=4.16"

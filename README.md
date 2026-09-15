@@ -94,6 +94,23 @@ pip install rapidocr-onnxruntime        # 本地模型 OCR（跨平台）
 pip install opencv-python-headless      # 轮廓检测：凡有边框的元素都框选标定（无语义）
 ```
 
+**可选增强（WGC 窗口截图，被遮挡窗口的像素级验证）**：
+
+```bash
+pip install windows-capture             # Windows.Graphics.Capture 封装（Rust，有预编译 wheel）
+```
+
+装上后，**非前台/被遮挡窗口**的 UIA 后台动作也能做像素级验证（普通截屏抓的是屏幕，被遮挡时只能抓到遮挡物；WGC 直接抓窗口自身画面）。
+未安装时自动禁用该通道，只做状态回读/控件树验证，不影响其他功能。
+
+**已知边界（实测，不是推测）**：窗口被**完全遮挡**时，DWM 不再为它合成新帧
+（实测：可见时后台变界面 seq 1→5，遮挡后同样操作 seq 7→7，取消遮挡后又 7→9）。
+此时插件会**如实报告「本次没有像素证据」并给出 uncertain**，
+而不是把陈旧帧当成「画面没变」——需要像素级确认时请先 `window_action(action='focus')` 把它露出来。
+
+注意：windows-capture 会带入 `opencv-python`；若与已有的 `opencv-python-headless` 版本不一致，
+建议 `pip install -U opencv-python-headless` 对齐（两者提供同一个 `cv2` 模块）。
+
 ## VL 模型配置（三选一）
 
 1. **零配置**：同时安装了 [irmia_vision](https://github.com/irmia2026/astrbot_plugin_irmia_vision) 插件 → 自动复用它的 VL 降级链；

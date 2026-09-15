@@ -13,8 +13,9 @@ astrbot_plugin_deskhand/
 ├── requirements.txt           # Pillow / pywin32 / httpx
 ├── _conf_schema.json          # VL 模型配置 + 定位与行为开关
 ├── engine/
-│   ├── desktop.py             # 单线程执行器、DPI 感知、STA COM 初始化、窗口枚举、虚拟屏原点、hwnd 记忆
-│   ├── uia.py                 # UIA L0：控件树遍历、pattern 路由（Invoke/SetValue）、状态回读验证（可选依赖）
+│   ├── desktop.py             # 单线程执行器（STA）、DPI 感知、窗口枚举（含 UWP 幽灵过滤）、虚拟屏原点、hwnd 记忆
+│   ├── uia.py                 # UIA L0：控件树遍历（CacheRequest 子树缓存）、pattern 路由（Invoke/SetValue）、状态回读验证
+│   ├── wgc.py                 # WGC 窗口截图：被遮挡窗口的真实画面（windows-capture 封装，专用 MTA 线程）
 │   ├── input.py               # win32 键鼠（SendInput UNICODE / 剪贴板粘贴 / 扫描码按键）
 │   ├── ocr.py                 # 本地 OCR：WinRT（winsdk）→ RapidOCR → 无（可插拔）
 │   ├── vl.py                  # VL 客户端：复用 irmia_vision 降级链或内置解析
@@ -92,6 +93,14 @@ click(target="保存")
 | 多尺度触发线取中位字高 16px（不是拍脑袋的 12px，也不是激进的 22px） | 真机界面文字实测 16-20px：≥17px 加放大没用（那类错字是引擎对形近字的混淆），却要多花 1.35s/次全屏；取 16 让小字号屏幕/日志/长文本吃到提升，常规屏幕不白花时间 |
 | UIA 遍历封顶改为**深度 20 / 节点 1500 / 时间 2s**（旧值深度 6 / 200 节点是 POC 期的拍脑袋保险丝） | 实测：真正卡住控件发现的是**深度**而非数量——深度 6 时 msedge 只得 6/40 个可交互控件、explorer 37/125、AstrBot 桌面端 0/60、msedgewebview2 1/6；放到深度 20 后节点最多 482、耗时 ≤0.5s。数量/时间上限只当安全保险丝 |
 | 慢 provider 自动降级（时间预算连续命中→记住该应用 300s，改用深度 6/预算 0.8s） | 实测 Bandizip/updater 单次 UIA 调用 ~300ms，深度 14 遍历要 14s；降级后同样能拿到部分控件但不卡死 look。预算检查必须**每轮**做（隔 N 节点查一次会把预算远远突破） |
+| UIA 遍历改用 **CacheRequest 子树缓存**（`TreeScope=Subtree` + `AutomationElementMode=None` + `GetCachedChildren`） | 逐节点遍历每控件要 ~8 次跨进程 COM 调用；子树缓存是「一次调用拉回整棵子树属性，之后全在本地内存走树」——实测加速 3～14×（qq 0.84→0.06s、msedge 0.37→0.03s、DSH 1.82→0.25s、AstrBot 0.90→0.14s）。代价：None 模式下元素无完整引用，**不能**取 pattern/包装成 Control |
+| 缓存路径的动作改用 `ElementFromPoint` 取真实元素 + 沿父链向上找身份匹配者；不匹配就回退逐节点重扫 | 缓存元素取不了 pattern（这正是它快的原因）；点上拿到的常常是目标的子元素（按钮中心是 Text）。**宁可慢，不可打错目标**：身份不符一律回退 |
+| 缓存 rect 必须自己做 `(l,t,w,h) → (l,t,r,b)` 换算 | UIA 原始 `UIA_BoundingRectanglePropertyId` 是 `double[4]` = **(left, top, width, height)**，而 uiautomation 库封装返回的是 right/bottom（实测对照：缓存 (398,489,1085,949) ↔ 库 right=1483 bottom=1438）——搞错会静默污染所有坐标 |
+| WGC 用 `windows-capture`（Rust 封装的 WGC），而不是自己写 C 扩展 | PyWinRT 本身能做 WGC，但 `Direct3D11CaptureFramePool.create_free_threaded` 只收真正的 `_winrt.Object`，而 `IDirect3DDevice` 必须由 `CreateDirect3D11DeviceFromDXGIDevice` 从裸 COM 指针造——纯 Python 过不去；写 C 扩展能通但把插件绑死在特定 CPython ABI（分发不可接受）。windows-capture 有 cp38–cp312 预编译 wheel 且原生支持 `window_hwnd` |
+| WGC 捕获跑在**专用线程**（不是 desktop 执行器线程） | windows-capture 内部按 **MTA** 初始化 WinRT，而 desktop 线程是 STA（UIA 需要）——直接在 desktop 线程调用会报 “Failed to initialize WinRT”（又一条套间教训） |
+| WGC 只用于**像素验证**，不用于坐标换算 | 它返回的是窗口内容（客户区物理像素，实测 818×469 vs 窗口 840×480，不含边框/标题栏）；尺寸与 GetWindowRect 不一致，拿它算点击坐标会偏 |
+| **陈旧帧不算证据**（WGC 的硬限制） | 窗口被完全遮挡时 DWM 停止为它合成新帧（实测 seq 可见 1→5 / 遮挡 7→7 / 解除遮挡 7→9），WGC 只能给旧帧。因此 `capture_window_ex` 回传 `newer`，上层判定为「没有像素证据」而非「画面没变」，回到状态/树证据，没证据就 uncertain——绝不假通过 |
+| WGC 会话必须**按 hwnd 长驻** | `windows-capture` 每次新建 `WindowsCapture` 线性泄漏 +11 句柄/+8MB（实测 100 次：413→1502 句柄、80.6→865.7MB）；泄漏在 session 构造与销毁，不在取帧。长驻后 30 次捕获 Δ句柄=0、Δ内存=0.1MB |
 
 ## 成本模型（deepseek-v4-flash-vision-exp 高峰价）
 
@@ -119,3 +128,4 @@ click(target="保存")
 | v2.6.1 | 2026-08 | UIA L0 吸收：engine/uia.py 控件树遍历（STA COM + 惰性导入 + 空壳三级回退 + 深度/数量封顶 + 标题栏 chrome 过滤）；look 窗口模式 UIA 先行（青色元素，OCR 12px 去重、CV 内部框跳过）；click/type_text 执行路由（Invoke/Toggle/ExpandCollapse/SelectionItem、ValuePattern.SetValue）后台执行，失败静默回落 win32；验证分层（状态回读 > 控件树变化 > 屏幕 diff，仅前台）；焦点变化如实回传 focus_changed；对抗性评审修复：空壳回退 PID×矩形双过滤（防动作打到无关窗口）、UIA 目标身份校验（防静默写错输入框）、before 位图异常路径不泄漏、判据顺序修正；UWP 幽灵 CoreWindow 过滤；慢空树缓存 |
 | v2.6.2 | 2026-09 | 反馈轮修复（Agent 实测现象驱动）：元素槽位改**通道保底配额**（uia 12/ocr 14/cv 8，剩余按优先级补）——不再先到先得，文字密屏下 CV 不再被饿死；截断双留痕（卡片末尾提示 + `element_budget` 字段，含每通道 shown/detected）；CV 去重只由真实控件触发（容器级 UIA 元素不得吞 CV，容器排到卡片末尾）；UIA 矩形钳制到窗口∩屏幕并标记 `rect_clamped`；OCR 多尺度从「整图放大（真机必然早退的死路径）」改为**分块放大**（真值基准：10px CER 56.8%→21.0%、真实渲染 12-13px 33.3%→16.7%），触发线按实测标定为中位字高 16px，新增 `ocr_multiscale` 配置与 `ocr_detail` 诊断 |
 | v2.6.3 | 2026-09 | UIA 遍历封顶按实测重标：深度 6→20、节点 200→1500、新增 2s 时间预算（实测深度 6 会丢大量控件：msedge 6/40、explorer 37/125、AstrBot 桌面端 0/60、webview2 1/6；放开后 DSH/AstrBot/Edge 均从 0 升到满配额 18）；新增慢 provider 自动降级（时间预算命中→记住 300s 改用深度 6/0.8s，实测 Bandizip 14s→3.1s）；`uia_detail`/`uia_note` 诊断回传（含截断原因） |
+| v2.6.4 | 2026-09 | **UIA CacheRequest 子树缓存**成为遍历主力（一次跨进程调用拉回整棵子树属性 + 本地走树，实测加速 3～14×；调度器缓存优先、失败自动回退逐节点且不重试）；缓存路径动作改用 `ElementFromPoint` 取真实元素（沿父链找身份匹配者，不匹配则回退逐节点重扫——宁可慢不可打错目标）；缓存 rect 按 UIA 真实语义 `(l,t,w,h)` 换算（防静默坐标偏移）；**WGC 截图**（`engine/wgc.py`）：被遮挡/非前台窗口也能抓到自身画面（实测遮挡对照组：屏幕截图差 9.79% 而 WGC 差 0.78%），按 hwnd 长驻会话（避免库的 +8MB/次泄漏）、专用 MTA 线程；**陈旧帧不算证据**——完全遮挡时 DWM 不合成新帧，如实报「无像素证据」而非「画面没变」；未安装 windows-capture 时自动禁用 |

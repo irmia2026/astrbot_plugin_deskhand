@@ -19,7 +19,7 @@ from typing import Optional
 
 from astrbot.api import FunctionTool as _AstrBotFunctionTool
 
-from ..engine import desktop, detect, input as inp, locate, memory as mem, ocr, scene, uia, verify, vl
+from ..engine import desktop, detect, input as inp, locate, memory as mem, ocr, scene, uia, verify, vl, wgc
 
 # AstrBot 运行环境必有 mcp；本地测试无 mcp 时退化为纯文本返回
 try:
@@ -99,9 +99,55 @@ async def _resolve_point(target: str = "", x: Optional[int] = None,
     return r
 
 
-async def _post_action_diff(before, bbox: Optional[tuple]) -> dict:
+async def _capture_spec_now(spec: Optional[dict], wait_newer: bool = False):
+    """按取图规格取一帧，返回 (image | None, diag)。
+
+    spec: {"kind": "screen", "bbox": ...} 或 {"kind": "wgc", "hwnd": ...}
+    - screen：普通截屏，便宜但抓的屏幕上看到的（被遮挡时是遮挡物）；
+    - wgc：抓窗口自身画面，不受遮挡影响（非前台/被遮挡窗口的验证靠它）。
+    wait_newer：仅对 wgc 有意义——动作后取图时等一帧更新的。**diag["newer"] is False
+               表示没拿到新帧**（窗口被完全遮挡时 DWM 不合成新帧，实测 seq 不增长），
+               上层据此判定「没有像素证据」，绝不能当作「画面没变」。
+    取图失败一律 image=None，由调用方如实降级。
+    """
+    if not spec:
+        return None, {"reason": "no spec"}
+    try:
+        if spec.get("kind") == "screen":
+            img = await desktop.run(desktop.screenshot, spec.get("bbox"))
+            return img, {"kind": "screen"}
+        if spec.get("kind") == "wgc":
+            img, diag = await desktop.run(wgc.capture_window_ex, spec["hwnd"], wait_newer)
+            diag["kind"] = "wgc"
+            return img, diag
+    except Exception as e:
+        logger.warning("取图失败（%s）: %s", spec.get("kind"), e)
+        return None, {"reason": f"{type(e).__name__}: {e}"}
+    return None, {"reason": "unknown spec"}
+
+
+async def _post_action_diff(before, bbox: Optional[tuple] = None,
+                            spec: Optional[dict] = None) -> dict:
+    """动作前后对比。spec 给定时按它取「后」帧（支持 WGC），否则用屏幕截图。
+
+    **陈旧帧不算证据**：WGC 拿不到新帧（窗口被完全遮挡、DWM 不合成）时返回
+    pixel_evidence=False，而不是「无变化」——否则等于把未验证当成已验证。
+    """
     await desktop.run(desktop.sleep, float(_cfg("post_action_wait", 0.4)))
-    after = await desktop.run(desktop.screenshot, bbox)
+    if spec is not None:
+        after, adiag = await _capture_spec_now(spec, wait_newer=True)
+    else:
+        after, adiag = await desktop.run(desktop.screenshot, bbox), {"kind": "screen"}
+    if after is None:
+        return {"changed": False, "percent": None, "bbox": None,
+                "meaningful": False, "text_changed": False,
+                "capture_failed": True, "pixel_evidence": False, "capture_diag": adiag}
+    if adiag.get("newer") is False:
+        # 拿到了图，但它是**旧帧**（窗口期间未重新合成）——不能当成「画面没变」
+        after.close()
+        return {"changed": False, "percent": None, "bbox": None,
+                "meaningful": False, "text_changed": False,
+                "stale_frame": True, "pixel_evidence": False, "capture_diag": adiag}
     try:
         d = verify.diff_images(before, after)
         # 有意义变化 = 尺寸变化 或 变化面积占比 ≥ 阈值（光标闪烁 ~0.007% 不算数）
@@ -670,12 +716,14 @@ async def scan_scene(window: str = "", max_elements: int = 30, image: bool = Tru
 
 async def _uia_click_result(el: dict, ures: dict, element: str, target: str,
                             before, bbox: Optional[tuple],
-                            foreground: bool) -> dict:
+                            foreground: bool, spec: Optional[dict] = None,
+                            capture_source: Optional[str] = None) -> dict:
     """UIA 后台点击的结果组装。
 
     验证分层：状态回读（ToggleState/ExpandCollapse/IsSelected）> 树结构变化
-    > 屏幕 diff（仅前台窗口——截图抓的是屏幕区域，后台/被遮挡窗口的像素不可信；
-    被遮挡窗口的像素级验证等 WGC 版本）。
+    > 像素 diff。像素证据的取图源：前台窗口用屏幕截图（便宜），
+    非前台/被遮挡窗口用 WGC 抓窗口自身画面（不受遮挡影响）；两者都拿不到时
+    如实回到 uncertain，不谎报验证通过。
 
     判据顺序（评审修正）：**任一正向证据成立即算成功**。旧写法“有可读状态就只认
     状态”会把“状态没变但控件树变了”的真成功报成 failed（如 toggle 打开了面板），
@@ -684,14 +732,24 @@ async def _uia_click_result(el: dict, ures: dict, element: str, target: str,
     verified = None
     verify_method = "none"
     diff = None
+    stale_frame = False
     state_readable = ures.get("state_before") is not None
     if ures.get("state_changed"):
         verified, verify_method = True, "state_readback"
     elif ures.get("tree_changed"):
         verified, verify_method = True, "tree_change"
-    elif foreground and before is not None:
-        diff = await _post_action_diff(before, bbox)
-        verified, verify_method = bool(diff["meaningful"] or diff.get("text_changed")), "screen_diff"
+    elif before is not None and (foreground or capture_source == "wgc"):
+        diff = await _post_action_diff(before, bbox, spec=spec)
+        if diff.get("capture_failed") or diff.get("stale_frame"):
+            # 取不到后帧 / 只拿到陈旧帧（完全遮挡时 DWM 不合成）——
+            # 这是「没有像素证据」，不是「画面没变」。回到状态/树证据，没证据就 uncertain。
+            stale_frame = bool(diff.get("stale_frame"))
+            diff = None
+            if state_readable:
+                verified, verify_method = False, "state_readback"
+        else:
+            verified = bool(diff["meaningful"] or diff.get("text_changed"))
+            verify_method = "wgc_diff" if capture_source == "wgc" else "screen_diff"
     elif state_readable:
         # 无任何正向证据、但控件状态可读且未变——这才是可靠的 failed
         verified, verify_method = False, "state_readback"
@@ -712,9 +770,10 @@ async def _uia_click_result(el: dict, ures: dict, element: str, target: str,
         verdict, vtext = "success", f"后台 {pattern} 已执行，界面控件树已变化"
     elif verified is True:
         pct = (diff or {}).get("percent")
+        src = "窗口画面(WGC)" if verify_method == "wgc_diff" else "画面"
         verdict, vtext = "success", (
-            f"后台 {pattern} 已执行（画面变化 {pct}%）" if pct
-            else f"后台 {pattern} 已执行（内容已变化）"
+            f"后台 {pattern} 已执行（{src}变化 {pct}%）" if pct
+            else f"后台 {pattern} 已执行（{src}已变化）"
         )
     elif verified is False and verify_method == "state_readback":
         verdict, vtext = "failed", (
@@ -729,8 +788,13 @@ async def _uia_click_result(el: dict, ures: dict, element: str, target: str,
             f"后台 {pattern} 已送达（窗口不在前台，无法像素验证；"
             f"该控件无状态回读）"
         )
-    vtext += focus_note
-
+    # 陈旧帧要说清楚：被完全遮挡的窗口 DWM 不合成新帧，此时**没有**像素证据，
+    # 不能读成「画面没变」（hint 字段里给 Agent 明确指引）
+    stale_note = ""
+    if stale_frame:
+        stale_note = ("（窗口被完全遮挡、DWM 未产生新帧 → 本次没有像素证据；"
+                      "如需像素级确认，请先 focus/取消遮挡再操作）")
+    vtext += stale_note + focus_note
     return {
         "ok": True,
         "action": "click",
@@ -748,6 +812,9 @@ async def _uia_click_result(el: dict, ures: dict, element: str, target: str,
             "state_after": ures.get("state_after"),
         },
         "verify_method": verify_method,
+        "verify_capture": capture_source,
+        "pixel_evidence": bool(diff is not None),
+        "stale_frame": bool(stale_frame),
         "focus_changed": bool(ures.get("focus_changed")),
         "effective": verified is True,
         "verdict": verdict,
@@ -786,12 +853,19 @@ async def click(target: str = "", element: str = "",
             and button == "left" and not double
             and bool(_cfg("uia_enabled", True)) and uia.available()
         ):
-            # 像素验证仅对前台窗口有意义（截图抓的是屏幕区域）
+            # 取图源选择：前台窗口用屏幕截图（便宜、路径已验证）；非前台/被遮挡用 WGC
+            # 抓窗口自身画面（不受遮挡影响）。两者都拿不到就如实不做像素验证。
             fg = await desktop.run(desktop.foreground_window)
             foreground = bool(fg and fg.get("hwnd") == win.get("hwnd"))
-            before = (
-                await desktop.run(desktop.screenshot, bbox0) if foreground else None
-            )
+            spec = capture_source = None
+            if foreground:
+                spec, capture_source = {"kind": "screen", "bbox": bbox0}, "screen"
+            elif wgc.available():
+                spec, capture_source = {"kind": "wgc", "hwnd": win["hwnd"]}, "wgc"
+            before, bdiag = (await _capture_spec_now(spec)) if spec else (None, {})
+            if before is None:
+                # 取图失败：不谎称有像素证据（spec 置空，后续也不会白取一次）
+                spec = capture_source = None
             expect_rect = (
                 (el["left"], el["top"], el["right"], el["bottom"])
                 if all(el.get(k) is not None for k in ("left", "top", "right", "bottom"))
@@ -811,7 +885,8 @@ async def click(target: str = "", element: str = "",
                 logger.warning("UIA 后台点击异常，回退真实鼠标路径: %s", e)
             if ures.get("ok"):
                 return await _uia_click_result(
-                    el, ures, element, target, before, bbox0, foreground
+                    el, ures, element, target, before, bbox0, foreground,
+                    spec=spec, capture_source=capture_source,
                 )
             if before is not None:
                 before.close()
