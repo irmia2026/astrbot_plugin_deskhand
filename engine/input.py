@@ -188,8 +188,12 @@ def _type_unicode(text: str, interval: float) -> None:
         time.sleep(interval)
 
 
-def _clipboard_paste(text: str) -> None:
-    """剪贴板通道：保存原剪贴板文本 → 写入目标文本 → Ctrl+V → 恢复原内容。"""
+def _clipboard_paste(text: str) -> dict:
+    """剪贴板通道：保存原剪贴板文本 → 写入目标文本 → Ctrl+V → 恢复原内容。
+
+    返回 {"restored": bool}——OpenClipboard 争用是瞬时的，还原按 3×100ms 重试；
+    结果必须回传给调用方，不能让确定性信息只活在日志里。
+    """
     import win32clipboard
 
     win32api, win32con = _win32()
@@ -215,20 +219,31 @@ def _clipboard_paste(text: str) -> None:
     win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
     time.sleep(0.3)  # 等粘贴完成再恢复剪贴板
 
+    restored = False
     if old_text is not None:
         # 恢复路径必须 finally 关剪贴板：执行器线程常驻，一旦漏关，
         # 全局剪贴板被本进程长期锁定（其他应用也无法复制粘贴）
-        try:
-            win32clipboard.OpenClipboard()
+        for _attempt in range(3):
             try:
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, old_text)
-            finally:
-                win32clipboard.CloseClipboard()
-        except Exception as e:
+                win32clipboard.OpenClipboard()
+                try:
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, old_text)
+                finally:
+                    win32clipboard.CloseClipboard()
+                restored = True
+                break
+            except Exception:
+                time.sleep(0.1)
+        if not restored:
             import logging
 
-            logging.getLogger("deskhand.input").warning("剪贴板恢复失败: %s", e)
+            logging.getLogger("deskhand.input").warning(
+                "剪贴板恢复失败（3 次重试均无法 OpenClipboard）"
+            )
+    else:
+        restored = True  # 原本就没有可恢复的内容
+    return {"restored": restored}
 
 
 def type_text(text: str, interval: float = 0.02, method: str = "auto") -> dict:
@@ -239,8 +254,9 @@ def type_text(text: str, interval: float = 0.02, method: str = "auto") -> dict:
     - unicode：强制 SendInput UNICODE 逐键注入；
     - clipboard：强制剪贴板粘贴。
     """
+    restored = None
     if method == "clipboard":
-        _clipboard_paste(text)
+        restored = _clipboard_paste(text)["restored"]
         used = "clipboard"
     elif method == "unicode":
         _type_unicode(text, interval)
@@ -250,9 +266,9 @@ def type_text(text: str, interval: float = 0.02, method: str = "auto") -> dict:
             _type_unicode(text, interval)
             used = "unicode"
         else:
-            _clipboard_paste(text)
+            restored = _clipboard_paste(text)["restored"]
             used = "clipboard"
-    return {"len": len(text), "method": used}
+    return {"len": len(text), "method": used, "clipboard_restored": restored}
 
 
 _NAMED_KEYS = {

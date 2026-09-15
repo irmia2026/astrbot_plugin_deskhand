@@ -25,7 +25,7 @@ help: |
   否则用本插件配置的 vl_provider_1/2/3（下拉）或 vl_model（手动）。
   本地 OCR 为可选增强：pip install winsdk 或 rapidocr-onnxruntime。
   CV 候选框检测为可选增强：pip install opencv-python-headless。
-version: v2.5.0
+version: v2.6.0
 author: irmia2026
 repo: https://github.com/irmia2026/astrbot_plugin_deskhand
 astrbot_version: ">=4.16"

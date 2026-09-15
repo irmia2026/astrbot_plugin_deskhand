@@ -15,6 +15,8 @@ import io
 import logging
 from typing import Optional
 
+from PIL import Image
+
 logger = logging.getLogger("deskhand.ocr")
 
 _engine_cache: Optional[str] = None  # "winrt" | "rapidocr" | "none"
@@ -179,16 +181,22 @@ def _recognize_once(image) -> list[dict]:
     return []
 
 
-def recognize(image, min_words: int = 8) -> list[dict]:
+def recognize(image, min_words: int = 8, min_char_height: int = 12) -> list[dict]:
     """识别 PIL 图像中的文字，返回 [{text, cx, cy, left, top, right, bottom}, ...]。
 
-    多尺度重试（坐标永远保持原图空间，调用方零换算）：
-    首遍词数不足 min_words 时，自动放大图像再识别一遍（小字号救星），
-    取词数更多的一遍，坐标按放大比例折回原图。
+    多尺度重试（坐标永远保持原图空间，调用方零换算）。双触发条件：
+    - 整图词数 < min_words（稀疏画面）；
+    - 词的中位字高 < min_char_height（小字号——真实屏幕词数再多也会触发）。
+    满足任一就放大重跑，取词数更多（或持平但更清晰）的一遍，坐标折回原图。
     """
     items = _recognize_once(image)
-    base_words = sum(1 for it in items if not it.get("line"))
-    if base_words >= min_words:
+    words = [it for it in items if not it.get("line")]
+
+    def _median_h(ws: list[dict]) -> float:
+        hs = sorted(it["bottom"] - it["top"] for it in ws)
+        return hs[len(hs) // 2] if hs else 99
+
+    if len(words) >= min_words and _median_h(words) >= min_char_height:
         return items
 
     w, h = image.size
@@ -206,13 +214,17 @@ def recognize(image, min_words: int = 8) -> list[dict]:
     except Exception:
         return items
 
-    if sum(1 for it in items2 if not it.get("line")) > base_words:
+    words2 = [it for it in items2 if not it.get("line")]
+    # 词数更多、或持平但字高更优（更清晰）时采用放大结果
+    if len(words2) > len(words) or (
+        len(words2) == len(words) and _median_h(words2) > _median_h(words)
+    ):
         inv = 1.0 / scale
         for it in items2:
             for k in ("cx", "cy", "left", "top", "right", "bottom"):
                 it[k] = int(it[k] * inv)
-        logger.info("OCR 多尺度命中: %d → %d 词 (scale=%.2f)",
-                    base_words, sum(1 for it in items2 if not it.get("line")), scale)
+        logger.info("OCR 多尺度命中: %d→%d 词, 中位字高 %.0f→%.0f (scale=%.2f)",
+                    len(words), len(words2), _median_h(words), _median_h(words2), scale)
         return items2
     return items
 

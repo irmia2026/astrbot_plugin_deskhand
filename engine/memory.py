@@ -58,6 +58,11 @@ class ElementMemory:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         with self._lock:
             self._conn.execute(_SCHEMA)
+            # 清理 class_name 时代的死数据（Chrome_WidgetWin_1 等）——
+            # 现在 app 键是 exe 文件名，旧键永远不会再被命中
+            self._conn.execute(
+                "DELETE FROM element_memory WHERE app NOT LIKE '%.exe' AND app != 'unknown'"
+            )
             self._conn.commit()
 
     def close(self) -> None:

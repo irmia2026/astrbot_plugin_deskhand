@@ -1,6 +1,6 @@
 # 🏗️ DeskHand v2 架构设计（视觉方案）
 
-> 版本 v2.5.0 · 2026-08 · 全面转向视觉方案
+> 版本 v2.6.0 · 2026-08 · 全面转向视觉方案
 
 ---
 
@@ -89,3 +89,4 @@ click(target="保存")
 | v2.3.0 | 2026-08 | 元素卡片机制：look/scan_scene 注册编号快照（e1..eN），click(element=eN) 直接引用，Agent 零坐标运算；动作结果压缩为 verdict 三档中文结论；look 默认只跑免费 OCR（VL 改按需） |
 | v2.4.0 | 2026-08 | 多模态 look/scan_scene：返回 CallToolResult 附元素标注图（AstrBot 缓存后喂给图像模态主模型）；CV 候选框检测通道（OpenCV 轮廓，凡有边框必标）；OCR 多尺度重试（小字号自动放大，坐标不外泄） |
 | v2.5.0 | 2026-08 | click(element) 现场校验+自愈：注册时存图像签名，点击前比对，失效先 OCR 重定位再点击，失败明确报 stale；CV 框窗口原点修复；屏外幽灵窗口过滤+同级优先非最小化；OCR 行级条目保中文整句；记忆库 app_key 改 exe 名防撞车；窗口遮挡告警；卡片/JSON 40 条一致 |
+| v2.6.0 | 2026-08 | 幽灵窗根治：无效 rect 跳档 + 进程名兜底（QQ NT 标题=会话名先天找不到，按 QQ.exe 取最大窗口）+ 诚实报错带 hwnd/iconic；OCR 多尺度真实修复（模块级 Image 导入缺失导致从未生效 + 词数/中位字高双触发）；剪贴板还原 3×100ms 重试 + clipboard_restored 回传；记忆库清理 class_name 时代死数据 |

@@ -268,8 +268,15 @@ async def look(window: str = "", question: str = "", grid: bool = False,
         win = await desktop.run(desktop.find_window, str(window))
         if win is None:
             titles = [w["title"] for w in await desktop.run(desktop.enum_windows)][:15]
+            # 诊断：是否有被跳过的最小化/幽灵候选（不然用户以为窗口不存在）
+            ghost = await desktop.run(desktop.find_window, str(window), True)
+            ghost_hint = (
+                f"。另匹配到一个当前不可用的窗口 hwnd={ghost['hwnd']} "
+                f"（{'最小化' if ghost.get('iconic') else '屏外'}），"
+                f"可先 window_action(action='restore', title=...)"
+            ) if ghost else ""
             return {"ok": False,
-                    "error": f"找不到标题包含「{window}」的窗口",
+                    "error": f"找不到标题包含「{window}」的可用窗口{ghost_hint}",
                     "visible_windows": titles}
         # 先校验再取值：最小化窗口 rect=None，直接 tuple() 会 TypeError
         if not desktop.valid_rect(win.get("rect")):
@@ -659,6 +666,7 @@ async def type_text(text: str, target: str = "", window: str = "",
         "action": "type",
         "len": len(text),
         "input_method": type_result.get("method"),
+        "clipboard_restored": type_result.get("clipboard_restored"),
         "focused_target": target or None,
         "verdict": verdict,
         "verdict_text": verdict_text,
@@ -751,7 +759,8 @@ async def window_action(action: str, title: str = "",
             if hwnd is not None:
                 matched_via = "hwnd_memory"
             else:
-                win = desktop.find_window(title)
+                # window_action 的 restore 需要命中最小化窗口 → include_iconic
+                win = desktop.find_window(title, include_iconic=True)
                 if win is None:
                     raise RuntimeError(f"找不到窗口「{title}」（已包含最小化窗口）")
                 hwnd = win["hwnd"]

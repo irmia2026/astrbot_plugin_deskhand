@@ -156,11 +156,41 @@ def recall_window(keyword: str) -> Optional[int]:
         return None
 
 
-def find_window(keyword: str) -> Optional[dict]:
-    """按标题关键词匹配窗口：别名展开 → 精确匹配 → 包含匹配；同级优先非最小化窗口。
+# 关键词 → 进程名（标题档全军覆没时按进程找窗口。
+# QQ NT 这类标题=会话名的应用，标题匹配先天找不到，只有按进程找才治本）
+_PROCESS_ALIASES = {
+    "qq": "qq.exe",
+    "wechat": "wechat.exe",
+    "vscode": "code.exe",
+    "vs code": "code.exe",
+}
 
-    最小化的幽灵窗口（如标题恰好叫「QQ」的最小化窗口）会在精确匹配档被跳过，
-    避免抢走真实窗口的匹配——需要操作最小化窗口时用 window_action。
+
+def _usable(w: Optional[dict]) -> bool:
+    """候选窗口当前可用（有有效 rect、不是最小化/幽灵态）。"""
+    return bool(w and valid_rect(w.get("rect")))
+
+
+def _process_fallback(kw: str) -> Optional[dict]:
+    """按进程名找窗口：非最小化 + 屏内 + 面积最大。"""
+    exe = _PROCESS_ALIASES.get(kw)
+    if not exe:
+        return None
+    cands = [
+        w for w in enum_windows()
+        if _usable(w) and app_key(w) == exe
+    ]
+    if not cands:
+        return None
+    return max(cands, key=lambda w: (w["rect"][2] - w["rect"][0]) * (w["rect"][3] - w["rect"][1]))
+
+
+def find_window(keyword: str, include_iconic: bool = False) -> Optional[dict]:
+    """按标题关键词匹配窗口：别名展开 → 精确 → 包含 → 进程名兜底。
+
+    无效 rect（最小化/幽灵态）的候选一律跳过并继续往下一档找——
+    不会再让「标题恰好叫 QQ 的最小化幽灵窗口」抢走匹配。
+    include_iconic=True 时不过滤最小化窗口（window_action 的 restore 需要）。
     """
     kw = (keyword or "").strip().lower()
     if not kw:
@@ -172,16 +202,17 @@ def find_window(keyword: str) -> Optional[dict]:
 
     wins = enum_windows()
 
-    def _pick(candidates: list) -> Optional[dict]:
-        normal = [w for w in candidates if not w.get("iconic")]
-        return (normal or candidates or [None])[0]
+    def _ok(w: dict) -> bool:
+        return True if include_iconic else _usable(w)
 
-    exact = [w for w in wins if w["title"].lower().strip() in kws]
-    hit = _pick(exact)
-    if hit:
-        return hit
-    contains = [w for w in wins if any(k in w["title"].lower() for k in kws)]
-    return _pick(contains)
+    for w in wins:
+        if w["title"].lower().strip() in kws and _ok(w):
+            return w
+    for w in wins:
+        t = w["title"].lower()
+        if any(k in t for k in kws) and _ok(w):
+            return w
+    return _process_fallback(kw)
 
 
 def foreground_window() -> Optional[dict]:
